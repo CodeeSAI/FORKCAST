@@ -57,6 +57,13 @@
     <section class="panel shock">
       <div class="section-head"><div><p class="eyebrow">02 / COUNTERFACTUAL</p><h2>Introduce a localized shock</h2></div><span class="pill accent">What-if simulation</span></div>
       <div class="controls">
+        <label class="field">Shock preset
+          <select id="shock-preset">
+            <option value="warm_ocean">Official · Warm Bay of Bengal (+3 K, +15% TCWV)</option>
+            <option value="monsoon_stall">Official · Monsoon stall (−40% u10 and v10)</option>
+            <option value="custom">Custom single-variable rectangle</option>
+          </select>
+        </label>
         <label class="field">Weather variable
           <select id="shock-channel">
             <option value="0">Temperature · t2m (K)</option>
