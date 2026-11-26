@@ -91,7 +91,8 @@ def _sample_inputs(batch_size: int = 2):
     init_4d = base[None, :, None, None].expand(T_IN, NC, NLAT, NLON).clone()
     doy_1d = torch.tensor([math.sin(1.2), math.cos(1.2)], dtype=torch.float32)
     init_5d = init_4d.unsqueeze(0).expand(batch_size, -1, -1, -1, -1).clone()
-    init_5d[1, :, 0] -= 2.0
+    if batch_size > 1:
+        init_5d[1, :, 0] -= 2.0
     doy_2d = doy_1d.unsqueeze(0).expand(batch_size, -1).clone()
     return init_4d, doy_1d, init_5d, doy_2d
 
