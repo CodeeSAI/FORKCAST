@@ -105,7 +105,13 @@ Start the server, then open:
 
 The dashboard accepts a JSON file containing one real input window (init_states and doy_sincos), calls the live /simulate endpoint, and displays baseline, shocked and difference grids. It does not contain pre-rendered forecasts.
 
-To create a valid starting-window JSON, export a real three-day sample from the supplied dataset in the local training workspace. Do not commit historical weather windows or lookup tables to the repository.
+To create a valid starting-window JSON, export a real three-day sample from the supplied dataset in the local training workspace. For example:
+
+~~~powershell
+python tools/export_window.py --nc C:\FORKCAST_DATA\india_climate_train.nc --last-day YYYY-MM-DD --out C:\FORKCAST_DATA\demo_window.json
+~~~
+
+Replace YYYY-MM-DD with a date present in the dataset. Keep the generated JSON outside the repository; do not commit historical weather windows or lookup tables.
 
 ## Evaluation and known limitations
 
