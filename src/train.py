@@ -234,6 +234,7 @@ def _run_epoch(
     grad_weight: float,
     neg_weight: float,
     shock_weight: float = 0.0,
+    shock_focus: str = "alternate",
     max_grad_norm: float = 1.0,
     max_batches: int = 0,
     max_mem_mb: float = 5500.0,
@@ -262,7 +263,12 @@ def _run_epoch(
         )
         shock_penalty = loss.new_zeros(())
         if shock_weight > 0.0 and rollout_steps >= 8:
-            shock_name = "warm_ocean" if n_batches % 2 == 0 else "monsoon_stall"
+            if shock_focus == "alternate":
+                shock_name = "warm_ocean" if n_batches % 2 == 0 else "monsoon_stall"
+            elif shock_focus in ("warm_ocean", "monsoon_stall"):
+                shock_name = shock_focus
+            else:
+                raise ValueError(f"Unsupported shock_focus: {shock_focus!r}")
             shock_penalty = counterfactual_response_loss(
                 model, init_states, doy_sc, pred_phys, shock_name
             )
@@ -625,6 +631,7 @@ def _execute_and_log_epoch(
         args.grad_weight,
         args.neg_weight,
         shock_weight=getattr(args, "shock_weight", 0.0),
+        shock_focus=getattr(args, "shock_focus", "alternate"),
         max_batches=args.max_batches,
         max_mem_mb=getattr(args, "max_mem_mb", 5500.0),
     )
@@ -862,6 +869,12 @@ def build_argparser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Weight for official localized-to-outward counterfactual response loss (active for K>=8)",
+    )
+    ap.add_argument(
+        "--shock-focus",
+        choices=("alternate", "warm_ocean", "monsoon_stall"),
+        default="alternate",
+        help="Train both official shock families alternately, or focus a single shock family",
     )
     ap.add_argument("--chunk-cache-mb", type=int, default=192)
     ap.add_argument("--threads", type=int, default=4)
