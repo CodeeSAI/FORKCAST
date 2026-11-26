@@ -55,13 +55,34 @@
     }
   }
   function makeShock() {
+    const preset = $("shock-preset").value;
+    const a = Array.from({length:6}, () => Array.from({length:32}, () => Array(36).fill(0)));
+    const last = state.input.init_states[2];
+
+    if (preset === "warm_ocean" || preset === "monsoon_stall") {
+      const la0 = 8, la1 = 20;
+      const lo0 = preset === "warm_ocean" ? 82 : 65;
+      const lo1 = preset === "warm_ocean" ? 94 : 75;
+      for (let y=0; y<32; y++) for (let x=0; x<36; x++) {
+        const lat = 6.5 + y, lon = 65.5 + x;
+        if (lat < la0 || lat > la1 || lon < lo0 || lon > lo1) continue;
+        if (preset === "warm_ocean") {
+          a[0][y][x] = 3.0;
+          a[5][y][x] = 0.15 * last[5][y][x];
+        } else {
+          a[2][y][x] = -0.40 * last[2][y][x];
+          a[3][y][x] = -0.40 * last[3][y][x];
+        }
+      }
+      return a;
+    }
+
     const channel = Number($("shock-channel").value);
     const delta = Number($("shock-delta").value);
     const la0 = Number($("lat-start").value), la1 = Number($("lat-end").value);
     const lo0 = Number($("lon-start").value), lo1 = Number($("lon-end").value);
     if (![channel, delta, la0, la1, lo0, lo1].every(Number.isFinite)) throw new Error("Shock controls must be finite numbers");
     if (la0 > la1 || lo0 > lo1) throw new Error("Shock start coordinates must not exceed end coordinates");
-    const a = Array.from({length:6}, () => Array.from({length:32}, () => Array(36).fill(0)));
     for (let y=0; y<32; y++) for (let x=0; x<36; x++) {
       const lat=6.5+y, lon=65.5+x;
       if (lat>=la0 && lat<=la1 && lon>=lo0 && lon<=lo1) a[channel][y][x]=delta;
