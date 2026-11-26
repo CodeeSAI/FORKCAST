@@ -1,0 +1,9 @@
+torch
+numpy
+scipy
+pandas
+xarray
+netCDF4
+scikit-learn
+fastapi
+uvicorn
