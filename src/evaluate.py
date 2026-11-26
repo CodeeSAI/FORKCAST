@@ -35,6 +35,9 @@ LOCAL_MIN_FRAC = 0.60
 DILATE = 3
 MAX_SPEED_CELLS_PER_DAY = 8.0
 STABLE_MAX_STD = 5.0
+OUTWARD_ENERGY_FRACTION = 0.02
+OUTWARD_GROWTH_FACTOR = 1.5
+MAX_FAR_RESPONSE_FRAC = 0.05
 
 BOX_BAY_OF_BENGAL = (8.0, 20.0, 82.0, 94.0)
 BOX_ARABIAN_SEA = (8.0, 20.0, 65.0, 75.0)
@@ -152,8 +155,8 @@ def causality_checks(
     out_e = np.array([energy[k][~near].sum() for k in range(steps)], dtype=np.float64)
     late = float(out_e[3:8].mean()) if steps >= 8 else float(out_e[-1])
     grows = bool(
-        late > 1.5 * float(out_e[0]) + 1e-12
-        and late > 0.02 * max(float(energy.sum(axis=(1, 2)).max()), 1e-12)
+        late > OUTWARD_GROWTH_FACTOR * float(out_e[0]) + 1e-12
+        and late > OUTWARD_ENERGY_FRACTION * max(float(energy.sum(axis=(1, 2)).max()), 1e-12)
     )
 
     ii, jj = np.indices((NLAT, NLON))
@@ -163,7 +166,7 @@ def causality_checks(
     for k in range(steps):
         far = dist > (DILATE + MAX_SPEED_CELLS_PER_DAY * (k + 1))
         tele = max(tele, float(energy[k][far].sum() / max(float(energy[k].sum()), 1e-12)))
-    no_teleport = bool(tele < 0.05)
+    no_teleport = bool(tele < MAX_FAR_RESPONSE_FRAC)
 
     return {
         "finite": True,
