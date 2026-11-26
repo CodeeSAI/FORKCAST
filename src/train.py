@@ -25,8 +25,11 @@ from src.evaluate import (
     BOX_BAY_OF_BENGAL,
     DILATE,
     LOCAL_MIN_FRAC,
+    MAX_FAR_RESPONSE_FRAC,
     MAX_SPEED_CELLS_PER_DAY,
     NONZERO_MIN,
+    OUTWARD_ENERGY_FRACTION,
+    OUTWARD_GROWTH_FACTOR,
     STABLE_MAX_STD,
     box_mask,
     causality_checks,
@@ -190,10 +193,10 @@ def counterfactual_response_loss(
     day1_outside = outside_energy[:, 0]
     days4_8_outside = outside_energy[:, 3:8].mean(dim=1)
     max_total_energy = energy.sum(dim=(-2, -1)).amax(dim=1)
-    required_outside = 0.02 * max_total_energy
+    required_outside = float(OUTWARD_ENERGY_FRACTION) * max_total_energy
     threshold_loss = F.relu(required_outside - days4_8_outside) / (required_outside + 1e-8)
     growth_ratio = days4_8_outside / (day1_outside + 1e-8)
-    growth_loss = F.relu(1.5 - growth_ratio) / 1.5
+    growth_loss = F.relu(float(OUTWARD_GROWTH_FACTOR) - growth_ratio) / float(OUTWARD_GROWTH_FACTOR)
 
     max_response_std = delta_norm.abs().amax(dim=(1, 2, 3, 4))
     nonzero_loss = F.relu(float(NONZERO_MIN) - max_response_std) / float(NONZERO_MIN)
@@ -209,7 +212,7 @@ def counterfactual_response_loss(
     ], axis=0)
     far_masks = torch.as_tensor(far_masks_np, dtype=energy.dtype, device=energy.device).unsqueeze(0)
     far_fraction = (energy * far_masks).sum(dim=(-2, -1)) / (energy.sum(dim=(-2, -1)) + 1e-12)
-    teleport_loss = F.relu(far_fraction.amax(dim=1) - 0.05).square()
+    teleport_loss = F.relu(far_fraction.amax(dim=1) - float(MAX_FAR_RESPONSE_FRAC)).square()
 
     return (
         local_loss
