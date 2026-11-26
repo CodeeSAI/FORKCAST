@@ -602,6 +602,30 @@ def competition_proxy_score(val_metrics: Dict[str, object]) -> Dict[str, float]:
     }
 
 
+def _can_promote_checkpoint(
+    val_metrics: Dict[str, object], score: float, best_score: float
+) -> bool:
+    """Promote only checkpoints that pass both official counterfactual shock gates."""
+    day4_skill = val_metrics.get("day4_ss_vs_persist")
+    if day4_skill is None or not np.isfinite(float(day4_skill)) or float(day4_skill) <= 0.0:
+        return False
+    if int(val_metrics.get("invalid_windows", -1)) != 0:
+        return False
+    if not bool(val_metrics.get("shock_validity_ok", False)):
+        return False
+    if not bool(val_metrics.get("null_shock_ok", False)):
+        return False
+    for name in ("warm_ocean", "monsoon_stall"):
+        shock = val_metrics.get(name)
+        if not isinstance(shock, dict):
+            return False
+        if not all(bool(shock.get(key, False)) for key in (
+            "nonzero", "localized", "propagates", "stable"
+        )):
+            return False
+    return bool(np.isfinite(score) and score > best_score)
+
+
 def _execute_and_log_epoch(
     stage_name: str,
     epoch: int,
@@ -706,20 +730,7 @@ def _execute_and_log_epoch(
 
     score_parts = competition_proxy_score(val_metrics)
     score = float(score_parts["total"])
-    day4_skill = val_metrics.get("day4_ss_vs_persist")
-    day4_gate = day4_skill is not None and np.isfinite(float(day4_skill)) and float(day4_skill) > 0.0
-    localized_shock_gate = any(
-        bool(val_metrics.get(name, {}).get("nonzero", False))
-        and bool(val_metrics.get(name, {}).get("localized", False))
-        for name in ("warm_ocean", "monsoon_stall")
-    )
-    if (
-        val_metrics["invalid_windows"] == 0
-        and val_metrics["shock_validity_ok"]
-        and day4_gate
-        and localized_shock_gate
-        and score > best_score
-    ):
+    if _can_promote_checkpoint(val_metrics, score, best_score):
         best_score = score
         _save_checkpoint(out_dir / "best.pt", model, epoch, stage_name, val_metrics, args)
     _save_checkpoint(out_dir / "latest.pt", model, epoch, stage_name, val_metrics, args)
