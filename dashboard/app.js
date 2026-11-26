@@ -9,6 +9,8 @@
   const msg = $("message");
   const map = $("map");
   const ctx = map.getContext("2d");
+  let dragStart = null;
+  let selection = null;
 
   function setMessage(text, isError = false) {
     msg.textContent = text;
@@ -137,6 +139,12 @@
     ctx.strokeStyle="rgba(255,255,255,.16)"; ctx.lineWidth=1;
     for(let x=0;x<=36;x+=6) { ctx.beginPath();ctx.moveTo(x*cw,0);ctx.lineTo(x*cw,map.height);ctx.stroke(); }
     for(let y=0;y<=32;y+=4) { ctx.beginPath();ctx.moveTo(0,y*chh);ctx.lineTo(map.width,y*chh);ctx.stroke(); }
+    if (selection) {
+      const sx=Math.min(selection.x0,selection.x1), ex=Math.max(selection.x0,selection.x1);
+      const sy=Math.min(selection.y0,selection.y1), ey=Math.max(selection.y0,selection.y1);
+      ctx.strokeStyle="#ffe28a";ctx.lineWidth=3;
+      ctx.strokeRect(sx*cw,(31-ey)*chh,(ex-sx+1)*cw,(ey-sy+1)*chh);
+    }
     $("result-label").textContent=(mode==="difference"?"Difference":mode==="shock"?"Counterfactual":"Baseline")+" · Day "+(day+1);
     const maxD=state.baseline&&state.shock?maxDiff(state.baseline,state.shock,day,ch).toFixed(4):"—";
     $("metrics").innerHTML='<div class="metric"><span>Min</span><strong>'+lo.toFixed(3)+' '+(mode==="difference"?"":units[ch])+'</strong></div><div class="metric"><span>Max</span><strong>'+hi.toFixed(3)+' '+(mode==="difference"?"":units[ch])+'</strong></div><div class="metric"><span>Max |difference|</span><strong>'+maxD+'</strong></div>';
@@ -181,5 +189,22 @@
   });
   ["channel","day","view-mode"].forEach(id=>$(id).addEventListener("change",draw));
   $("steps").addEventListener("change",()=>{$("day").max=$("steps").value;if(Number($("day").value)>Number($("steps").value))$("day").value=$("steps").value;});
+  function gridPoint(event) {
+    const rect=map.getBoundingClientRect();
+    const x=Math.max(0,Math.min(35,Math.floor((event.clientX-rect.left)/rect.width*36)));
+    const topY=Math.max(0,Math.min(31,Math.floor((event.clientY-rect.top)/rect.height*32)));
+    return {x:x,y:31-topY};
+  }
+  map.addEventListener("pointerdown",event=>{dragStart=gridPoint(event);selection=null;map.setPointerCapture(event.pointerId);});
+  map.addEventListener("pointerup",event=>{
+    if(!dragStart)return;
+    const end=gridPoint(event);selection={x0:dragStart.x,y0:dragStart.y,x1:end.x,y1:end.y};dragStart=null;
+    const minX=Math.min(selection.x0,selection.x1),maxX=Math.max(selection.x0,selection.x1);
+    const minY=Math.min(selection.y0,selection.y1),maxY=Math.max(selection.y0,selection.y1);
+    $("lon-start").value=65.5+minX;$("lon-end").value=65.5+maxX;
+    $("lat-start").value=6.5+minY;$("lat-end").value=6.5+maxY;
+    $("shock-preset").value="custom";
+    setMessage("Custom shock rectangle selected on the grid. Run the shocked forecast to compare.");draw();
+  });
   checkHealth();draw();
 })();
