@@ -6,6 +6,7 @@ The server becomes ready only after a real trained checkpoint is loaded.
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import sys
 import time
@@ -104,16 +105,47 @@ def health() -> Any:
 
 def _as_float32(value: Any, name: str, expected_shape: tuple[int, ...]) -> np.ndarray:
     try:
-        arr = np.asarray(value, dtype=np.float32)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise HTTPException(status_code=422, detail=f"{name} must be a numeric array") from exc
+        if isinstance(value, dict):
+            if "b64" not in value or "shape" not in value:
+                raise ValueError("encoded array needs b64 and shape")
+
+            shape = value["shape"]
+            if not isinstance(shape, list) or any(type(d) is not int or d < 0 for d in shape):
+                raise ValueError("invalid encoded array shape")
+
+            if tuple(shape) != expected_shape:
+                raise ValueError(f"shape {tuple(shape)} does not match {expected_shape}")
+
+            encoded = value["b64"]
+            if not isinstance(encoded, str):
+                raise ValueError("b64 must be a string")
+
+            raw = base64.b64decode(encoded, validate=True)
+            expected_bytes = int(np.prod(expected_shape)) * 4
+            if len(raw) != expected_bytes:
+                raise ValueError("base64 data length does not match shape")
+
+            arr = np.frombuffer(raw, dtype="<f4").reshape(expected_shape).copy()
+        else:
+            arr = np.asarray(value, dtype=np.float32)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{name} must be a valid numeric array: {exc}",
+        ) from exc
+
     if arr.shape != expected_shape:
         raise HTTPException(
             status_code=422,
             detail=f"{name} shape {arr.shape} does not match required {expected_shape}",
         )
+
     if not np.isfinite(arr).all():
         raise HTTPException(status_code=422, detail=f"{name} must contain only finite values")
+
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
