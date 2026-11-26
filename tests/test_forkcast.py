@@ -25,7 +25,7 @@ from src.evaluate import (
     validity,
 )
 from src.model import MAX_STEPS, OROGRAPHY_SCALE, SCORE_STEPS, ForkcastResCNN
-from src.train import _save_checkpoint
+from src.train import _save_checkpoint, counterfactual_response_loss
 
 NC_PATH = Path(r"C:\FORKCAST_DATA\india_climate_train.nc")
 STATS_PATH = Path(r"C:\FORKCAST_DATA\stats.json")
@@ -243,6 +243,23 @@ class TestForkcastFixesAndContracts(unittest.TestCase):
             self.assertLessEqual(float(arr[:, 0].max()), 333.15)
             self.assertGreaterEqual(float(arr[:, 1].min()), 0.0)
             self.assertGreaterEqual(float(arr[:, 5].min()), 0.0)
+
+    def test_counterfactual_response_loss_is_finite_and_differentiable(self) -> None:
+        model = _make_dummy_model()
+        init_4d, doy_1d, init_5d, doy_2d = _sample_inputs(batch_size=1)
+
+        for shock_name in ("warm_ocean", "monsoon_stall"):
+            model.zero_grad(set_to_none=True)
+            baseline = model.rollout(init_5d, doy_2d, steps=10)
+            loss = counterfactual_response_loss(
+                model, init_5d, doy_2d, baseline, shock_name
+            )
+            self.assertTrue(torch.isfinite(loss))
+            self.assertTrue(loss.requires_grad)
+            loss.backward()
+            grads = [p.grad for p in model.parameters() if p.grad is not None]
+            self.assertTrue(grads)
+            self.assertTrue(all(torch.isfinite(g).all() for g in grads))
 
     def test_stability_diagnostics_batched_and_unbatched(self) -> None:
         model = _make_dummy_model()
