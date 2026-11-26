@@ -23,7 +23,7 @@ from src.dataset import (
     compute_train_climatology,
     load_stats,
 )
-from src.model import ForkcastResCNN
+from src.model import ForkcastResCNN, MAX_STEPS, SCORE_STEPS
 
 LEAD_DAYS: Tuple[int, ...] = (1, 4, 8)
 RAIN_THRESH = 10.0
@@ -136,15 +136,17 @@ def causality_checks(
             "propagates": False,
             "stable": False,
         }
-    std4 = std[None, :, None, None]
-    z = np.abs(d / std4)
+    std4 = std.astype(np.float64)[None, :, None, None]
+    d64 = d.astype(np.float64)
+    z = np.abs(d64 / std4)
     nonzero = bool(z.max() >= NONZERO_MIN)
     stable = bool(z.max() <= STABLE_MAX_STD)
-    energy = ((d / std4) ** 2).sum(axis=1)
+    energy = ((d64 / std4) ** 2).sum(axis=1)
     steps = energy.shape[0]
     near = near_mask(box)
     tot1 = float(energy[0].sum())
-    near_frac_day1 = float(energy[0][near].sum() / tot1) if tot1 > 0 else 0.0
+    near1 = float(energy[0][near].sum())
+    near_frac_day1 = float(near1 / tot1) if tot1 > 0 else 0.0
     localized = bool(tot1 > 0 and near_frac_day1 >= LOCAL_MIN_FRAC)
 
     out_e = np.array([energy[k][~near].sum() for k in range(steps)], dtype=np.float64)
@@ -170,9 +172,12 @@ def causality_checks(
         "propagates": bool(grows and no_teleport),
         "stable": stable,
         "max_abs_std": float(z.max()),
+        "total_energy_day1": tot1,
+        "near_energy_day1": near1,
         "near_frac_day1": near_frac_day1,
         "out_energy_day1": float(out_e[0]),
         "out_energy_days4_8": late,
+        "out_energy_grows": grows,
         "far_frac_max": tele,
         "no_teleport": no_teleport,
     }
@@ -186,6 +191,8 @@ def evaluate_vs_persistence(
     leads: Sequence[int] = LEAD_DAYS,
 ) -> Dict[str, object]:
     """Fast multi-step validation benchmark against repeat-yesterday persistence."""
+    if steps < 1 or steps > MAX_STEPS:
+        raise ValueError(f"steps must be in [1, {MAX_STEPS}], got {steps}")
     prev_steps = dataset.rollout_steps
     if prev_steps != steps:
         dataset.set_rollout_steps(steps)
@@ -215,6 +222,8 @@ def evaluate_vs_persistence(
     lead_metrics: Dict[str, Dict[str, object]] = {}
     ss_list: List[float] = []
     for d in leads:
+        if d > steps:
+            continue
         idx = d - 1
         r_m = rmse_lat(preds[:, idx], trues[:, idx])
         r_p = rmse_lat(pers[:, idx], trues[:, idx])
@@ -242,7 +251,7 @@ def evaluate_vs_persistence(
         "split": dataset.split,
         "num_windows": int(preds.shape[0]),
         "steps": int(steps),
-        "mean_ss_vs_persist": float(np.mean(ss_list)),
+        "mean_ss_vs_persist": float(np.mean(ss_list)) if ss_list else float("nan"),
         "day4_ss_vs_persist": lead_metrics["day_4"]["mean_ss_vs_persist"] if "day_4" in lead_metrics else None,
         "valid_windows": int(preds.shape[0] - valid_failures),
         "invalid_windows": int(valid_failures),
@@ -257,14 +266,26 @@ def evaluate_full(
     nc_path: str | Path,
     stats: Dict[str, object],
     split: str = "val",
-    steps: int = 10,
+    steps: int = SCORE_STEPS,
     batch_size: int = 32,
     climatology: Optional[np.ndarray] = None,
+    dataset: Optional[ForkcastNetCDFDataset] = None,
 ) -> Dict[str, object]:
     """Full validation report: persistence & train-climatology skill, CSI, anti-blur, and causality."""
     import datetime as dt
 
-    ds = ForkcastNetCDFDataset(nc_path, split=split, rollout_steps=steps)
+    if steps < 1 or steps > MAX_STEPS:
+        raise ValueError(f"steps must be in [1, {MAX_STEPS}], got {steps}")
+
+    owns_ds = dataset is None
+    if owns_ds:
+        ds = ForkcastNetCDFDataset(nc_path, split=split, rollout_steps=steps)
+        prev_steps = steps
+    else:
+        ds = dataset
+        prev_steps = ds.rollout_steps
+        if prev_steps != steps:
+            ds.set_rollout_steps(steps)
     try:
         loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
         if climatology is None:
@@ -299,6 +320,8 @@ def evaluate_full(
         trues = np.concatenate(true_all, axis=0)
 
         leads_out: Dict[str, Dict[str, object]] = {}
+        all_ss_persist: List[float] = []
+        all_ss_clim: List[float] = []
         all_ss_best: List[float] = []
         all_csi_ss: List[float] = []
         for d in LEAD_DAYS:
@@ -316,8 +339,13 @@ def evaluate_full(
             cm = csi(preds[:, idx, 1], trues[:, idx, 1], RAIN_THRESH)
             cp = csi(pers[:, idx, 1], trues[:, idx, 1], RAIN_THRESH)
             cc = csi(clims[:, idx, 1], trues[:, idx, 1], RAIN_THRESH)
-            ref_csi = float(np.nanmax([cp, cc]))
-            csi_ss = float((cm - ref_csi) / (1.0 - ref_csi)) if np.isfinite(cm) and ref_csi < 1.0 else float("nan")
+            has_ref = bool(np.isfinite([cp, cc]).any())
+            ref_csi = float(np.nanmax([cp, cc])) if has_ref else float("nan")
+            csi_ss = (
+                float((cm - ref_csi) / (1.0 - ref_csi))
+                if np.isfinite(cm) and np.isfinite(ref_csi) and ref_csi < 1.0
+                else float("nan")
+            )
             vr = variance_ratio(preds[:, idx], trues[:, idx])
 
             leads_out[f"day_{d}"] = {
@@ -328,6 +356,7 @@ def evaluate_full(
                 "ss_vs_clim": {c: float(ss_c[i]) for i, c in enumerate(CHANNELS)},
                 "ss_vs_best_ref": {c: float(ss_best[i]) for i, c in enumerate(CHANNELS)},
                 "mean_ss_vs_persist": float(np.mean(ss_p)),
+                "mean_ss_vs_clim": float(np.mean(ss_c)),
                 "mean_ss_vs_best_ref": float(np.mean(ss_best)),
                 "csi_model": cm,
                 "csi_persist": cp,
@@ -335,11 +364,14 @@ def evaluate_full(
                 "csi_skill": csi_ss,
                 "variance_ratio": {c: float(vr[i]) for i, c in enumerate(CHANNELS)},
             }
+            all_ss_persist.append(float(np.mean(ss_p)))
+            all_ss_clim.append(float(np.mean(ss_c)))
             all_ss_best.append(float(np.mean(ss_best)))
             if np.isfinite(csi_ss):
                 all_csi_ss.append(csi_ss)
 
         invalid = sum(1 for i in range(preds.shape[0]) if validity(preds[i], steps))
+        all_finite = bool(np.isfinite(preds).all())
 
         # Shock causality & latency check on a monsoon-season validation anchor if available
         monsoon_idx = 0
@@ -368,13 +400,41 @@ def evaluate_full(
         warm_chk = causality_checks(base_out, warm_out, BOX_BAY_OF_BENGAL, std_np)
         stall_chk = causality_checks(base_out, stall_out, BOX_ARABIAN_SEA, std_np)
 
+        shock_validity = {
+            "baseline": validity(base_out, steps),
+            "warm_ocean": validity(warm_out, steps),
+            "monsoon_stall": validity(stall_out, steps),
+            "null": validity(null_out, steps),
+        }
+        shock_validity_ok = all(len(v) == 0 for v in shock_validity.values())
+        shock_rollout_stats = {
+            name: {
+                "all_finite": bool(np.isfinite(arr).all()),
+                "per_channel_min": {c: float(arr[:, i].min()) for i, c in enumerate(CHANNELS)},
+                "per_channel_max": {c: float(arr[:, i].max()) for i, c in enumerate(CHANNELS)},
+            }
+            for name, arr in (
+                ("baseline", base_out),
+                ("warm_ocean", warm_out),
+                ("monsoon_stall", stall_out),
+                ("null", null_out),
+            )
+        }
+
         return {
-            "split": split,
+            "split": ds.split,
             "num_windows": int(preds.shape[0]),
             "steps": int(steps),
+            "day4_ss_vs_persist": leads_out["day_4"]["mean_ss_vs_persist"] if "day_4" in leads_out else None,
+            "mean_ss_vs_persist": float(np.mean(all_ss_persist)) if all_ss_persist else None,
+            "mean_ss_vs_clim": float(np.mean(all_ss_clim)) if all_ss_clim else None,
             "mean_ss_vs_best_ref": float(np.mean(all_ss_best)) if all_ss_best else None,
             "mean_csi_skill": float(np.mean(all_csi_ss)) if all_csi_ss else None,
+            "all_finite": all_finite,
+            "valid_windows": int(preds.shape[0] - invalid),
             "invalid_windows": int(invalid),
+            "per_channel_min": {c: float(preds[:, :, i].min()) for i, c in enumerate(CHANNELS)},
+            "per_channel_max": {c: float(preds[:, :, i].max()) for i, c in enumerate(CHANNELS)},
             "min_tp": float(preds[:, :, 1].min()),
             "min_tcwv": float(preds[:, :, 5].min()),
             "leads": leads_out,
@@ -382,11 +442,17 @@ def evaluate_full(
             "null_shock_max_std_diff": null_diff_std,
             "null_shock_ok": bool(null_diff_std <= NULL_TOL),
             "causality_anchor_date": str(anchor_dates[monsoon_idx]),
+            "shock_validity": shock_validity,
+            "shock_validity_ok": shock_validity_ok,
+            "shock_rollout_stats": shock_rollout_stats,
             "warm_ocean": warm_chk,
             "monsoon_stall": stall_chk,
         }
     finally:
-        ds.close()
+        if owns_ds:
+            ds.close()
+        elif prev_steps != ds.rollout_steps:
+            ds.set_rollout_steps(prev_steps)
 
 
 def stability_diagnostics(
@@ -399,16 +465,26 @@ def stability_diagnostics(
     OFFLINE RESEARCH DIAGNOSTIC ONLY — not part of the API contract.
 
     Runs extended rollouts beyond MAX_STEPS by manually iterating model.step()
-    to test long-horizon stability. This must never be used in serve.py or
-    any API boundary code.
+    to test long-horizon stability. Supports both unbatched [3,6,32,36] and
+    batched [B,3,6,32,36] inputs. Must never be used in serve.py or API code.
     """
-    import math
+    if init_states.ndim not in (4, 5):
+        raise ValueError(f"init_states must be 4D or 5D, got {tuple(init_states.shape)}")
+
+    unbatched = init_states.ndim == 4
+    if unbatched and doy_sincos.ndim != 1:
+        raise ValueError(f"doy_sincos must be 1D for unbatched init_states, got {tuple(doy_sincos.shape)}")
+    if not unbatched and (doy_sincos.ndim != 2 or doy_sincos.shape[0] != init_states.shape[0]):
+        raise ValueError(
+            f"doy_sincos shape {tuple(doy_sincos.shape)} incompatible with batch size {init_states.shape[0]}"
+        )
 
     model.eval()
     results: Dict[str, object] = {}
     with torch.no_grad():
         for long_steps in horizons:
-            unbatched = init_states.ndim == 4
+            if long_steps < 1:
+                raise ValueError(f"horizon step count must be >= 1, got {long_steps}")
             if unbatched:
                 window = init_states.unsqueeze(0).to(dtype=torch.float32).clone()
                 cur_doy = doy_sincos.unsqueeze(0).to(dtype=torch.float32)
@@ -417,24 +493,39 @@ def stability_diagnostics(
                 cur_doy = doy_sincos.to(dtype=torch.float32)
 
             preds_list = []
-            for _ in range(long_steps):
+            for _ in range(int(long_steps)):
                 pred = model.step(window, cur_doy)
                 preds_list.append(pred)
                 window = torch.cat([window[:, 1:], pred.unsqueeze(1)], dim=1)
                 cur_doy = model.advance_doy_sincos(cur_doy, steps=1)
 
-            out = torch.stack(preds_list, dim=1)
-            if unbatched:
-                out = out.squeeze(0)
-            long_out = out.cpu().numpy()
+            # Always [B, long_steps, 6, 32, 36] so channel axes never shift.
+            out_batched = torch.stack(preds_list, dim=1).cpu().numpy()
+            bsz = out_batched.shape[0]
+
+            validity_errors: List[str] = []
+            invalid_samples = 0
+            for b in range(bsz):
+                errs = validity(out_batched[b], int(long_steps))
+                if errs:
+                    invalid_samples += 1
+                    if unbatched:
+                        validity_errors.extend(errs)
+                    else:
+                        validity_errors.extend(f"sample_{b}: {e}" for e in errs)
 
             results[f"steps_{long_steps}"] = {
-                "validity_errors": validity(long_out, long_steps),
-                "all_finite": bool(np.isfinite(long_out).all()),
-                "min_tp": float(long_out[:, 1].min()),
-                "min_tcwv": float(long_out[:, 5].min()),
-                "max_abs_t2m": float(np.abs(long_out[:, 0]).max()),
-                "t2m_range": [float(long_out[:, 0].min()), float(long_out[:, 0].max())],
+                "num_samples": int(bsz),
+                "invalid_samples": int(invalid_samples),
+                "validity_errors": validity_errors,
+                "all_finite": bool(np.isfinite(out_batched).all()),
+                "min_tp": float(out_batched[:, :, 1].min()),
+                "min_tcwv": float(out_batched[:, :, 5].min()),
+                "max_abs_t2m": float(np.abs(out_batched[:, :, 0]).max()),
+                "t2m_range": [
+                    float(out_batched[:, :, 0].min()),
+                    float(out_batched[:, :, 0].max()),
+                ],
             }
     return results
 

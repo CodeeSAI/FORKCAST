@@ -13,16 +13,68 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from src.dataset import LAT, ForkcastNetCDFDataset, load_stats
-from src.dataset import CHANNELS
+from src.dataset import (
+    CHANNELS,
+    LAT,
+    ForkcastNetCDFDataset,
+    compute_train_climatology,
+    load_stats,
+)
 from src.evaluate import (
     BOX_ARABIAN_SEA,
     BOX_BAY_OF_BENGAL,
     causality_checks,
-    evaluate_vs_persistence,
+    evaluate_full,
     make_shock,
+    validity,
 )
-from src.model import ForkcastResCNN
+from src.model import SCORE_STEPS, ForkcastResCNN
+
+
+def _get_process_memory_mb() -> Optional[Dict[str, float]]:
+    """Measure current and peak process RAM in MB (Windows API with POSIX fallback)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.K32GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+            wintypes.DWORD,
+        ]
+        k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        if k32.K32GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
+            return {
+                "working_set_mb": round(pmc.WorkingSetSize / (1024 * 1024), 2),
+                "peak_working_set_mb": round(pmc.PeakWorkingSetSize / (1024 * 1024), 2),
+            }
+    except Exception:
+        pass
+    try:
+        import resource  # type: ignore
+
+        peak_kb = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return {"working_set_mb": round(peak_kb / 1024.0, 2), "peak_working_set_mb": round(peak_kb / 1024.0, 2)}
+    except Exception:
+        return None
 
 
 def _lat_weight_tensor() -> torch.Tensor:
@@ -100,10 +152,13 @@ def _run_epoch(
     neg_weight: float,
     max_grad_norm: float = 1.0,
     max_batches: int = 0,
-) -> Dict[str, float]:
+    max_mem_mb: float = 5500.0,
+) -> Tuple[Dict[str, float], Dict[str, float]]:
     model.train()
     sums = {"total": 0.0, "mse": 0.0, "grad": 0.0, "neg": 0.0}
     n_batches = 0
+    total_batches = len(loader)
+    t0 = time.perf_counter()
 
     for init_states, doy_sc, targets in loader:
         optimizer.zero_grad(set_to_none=True)
@@ -121,9 +176,26 @@ def _run_epoch(
             grad_weight=grad_weight,
             neg_weight=neg_weight,
         )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Non-finite loss encountered at batch {n_batches + 1}: {parts}"
+            )
         loss.backward()
+
+        for name, p in model.named_parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                raise FloatingPointError(
+                    f"Non-finite gradient in {name} at batch {n_batches + 1}"
+                )
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
+
+        mem = _get_process_memory_mb()
+        if mem and max_mem_mb > 0 and mem["working_set_mb"] > max_mem_mb:
+            raise MemoryError(
+                f"Working set memory exceeded limit: {mem['working_set_mb']} MB > {max_mem_mb} MB"
+            )
 
         for k, v in parts.items():
             sums[k] += v
@@ -132,6 +204,61 @@ def _run_epoch(
         if max_batches > 0 and n_batches >= max_batches:
             break
 
+    train_elapsed_s = max(time.perf_counter() - t0, 1e-9)
+    batches_per_sec = n_batches / train_elapsed_s
+    est_full_epoch_s = total_batches / max(batches_per_sec, 1e-9)
+    avg_loss = {k: v / max(n_batches, 1) for k, v in sums.items()}
+    timing = {
+        "batches_run": int(n_batches),
+        "total_batches_in_epoch": int(total_batches),
+        "train_elapsed_s": round(train_elapsed_s, 3),
+        "batches_per_sec": round(batches_per_sec, 4),
+        "est_full_epoch_s": round(est_full_epoch_s, 2),
+    }
+    return avg_loss, timing
+
+
+def _evaluate_val_loss(
+    model: ForkcastResCNN,
+    val_ds: ForkcastNetCDFDataset,
+    lat_w: torch.Tensor,
+    rollout_steps: int,
+    batch_size: int,
+    rain_alpha: float,
+    grad_weight: float,
+    neg_weight: float,
+) -> Dict[str, float]:
+    """Compute validation loss on the same objective and rollout horizon as training."""
+    prev_steps = val_ds.rollout_steps
+    if prev_steps != rollout_steps:
+        val_ds.set_rollout_steps(rollout_steps)
+    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    model.eval()
+    sums = {"total": 0.0, "mse": 0.0, "grad": 0.0, "neg": 0.0}
+    n_batches = 0
+    try:
+        with torch.no_grad():
+            for init_states, doy_sc, targets in loader:
+                pred_phys, pred_raw = model.rollout(
+                    init_states, doy_sc, steps=rollout_steps, return_raw=True
+                )
+                _, parts = compute_rainfall_aware_loss(
+                    pred_phys,
+                    pred_raw,
+                    targets,
+                    model.mean,
+                    model.std,
+                    lat_w,
+                    rain_alpha=rain_alpha,
+                    grad_weight=grad_weight,
+                    neg_weight=neg_weight,
+                )
+                for k, v in parts.items():
+                    sums[k] += v
+                n_batches += 1
+    finally:
+        if val_ds.rollout_steps != prev_steps:
+            val_ds.set_rollout_steps(prev_steps)
     return {k: v / max(n_batches, 1) for k, v in sums.items()}
 
 
@@ -245,46 +372,17 @@ def run_smoke_test(args: argparse.Namespace) -> Dict[str, object]:
             stall_out = model.rollout(v_init, v_doy, steps=10, perturbation=stall_p).numpy()
 
         std_np = np.asarray(stats["std"], dtype=np.float32)
+        null_std_diff = float((np.abs(null_out - base) / std_np[None, :, None, None]).max())
         warm_chk = causality_checks(base, warm_out, BOX_BAY_OF_BENGAL, std_np)
         stall_chk = causality_checks(base, stall_out, BOX_ARABIAN_SEA, std_np)
+        shock_validity = {
+            "baseline": validity(base, 10),
+            "warm_ocean": validity(warm_out, 10),
+            "monsoon_stall": validity(stall_out, 10),
+            "null": validity(null_out, 10),
+        }
 
-        # RSS memory measurement (Windows K32GetProcessMemoryInfo / Linux resource fallback)
-        rss_mb = None
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            k32 = ctypes.windll.kernel32
-            k32.GetCurrentProcess.restype = wintypes.HANDLE
-            k32.K32GetProcessMemoryInfo.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
-                wintypes.DWORD,
-            ]
-            k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
-            pmc = PROCESS_MEMORY_COUNTERS()
-            pmc.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-            if k32.K32GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
-                rss_mb = {
-                    "working_set_mb": round(pmc.WorkingSetSize / (1024 * 1024), 2),
-                    "peak_working_set_mb": round(pmc.PeakWorkingSetSize / (1024 * 1024), 2),
-                }
-        except Exception:
-            rss_mb = None
+        rss_mb = _get_process_memory_mb()
 
         return {
             "split_days": {
@@ -342,6 +440,9 @@ def run_smoke_test(args: argparse.Namespace) -> Dict[str, object]:
                 "tp_nonneg": bool(float(base[:, 1].min()) >= 0.0),
                 "tcwv_nonneg": bool(float(base[:, 5].min()) >= 0.0),
                 "null_shock_max_abs_diff": null_max_diff,
+                "null_shock_max_std_diff": null_std_diff,
+                "shock_validity": shock_validity,
+                "shock_validity_ok": all(len(v) == 0 for v in shock_validity.values()),
                 "warm_ocean": warm_chk,
                 "monsoon_stall": stall_chk,
             },
@@ -351,6 +452,113 @@ def run_smoke_test(args: argparse.Namespace) -> Dict[str, object]:
         train_ds.close()
         val_ds.close()
         holdout_ds.close()
+
+
+def _execute_and_log_epoch(
+    stage_name: str,
+    epoch: int,
+    k_steps: int,
+    model: ForkcastResCNN,
+    train_loader: DataLoader,
+    val_ds: ForkcastNetCDFDataset,
+    train_clim: np.ndarray,
+    stats: Dict[str, object],
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    lat_w: torch.Tensor,
+    args: argparse.Namespace,
+    out_dir: Path,
+    log_path: Path,
+    best_score: float,
+) -> float:
+    """Run one stage epoch, compute full pilot/validation telemetry, log JSONL, and checkpoint."""
+    t_ep0 = time.perf_counter()
+    tr_loss, timing = _run_epoch(
+        model,
+        train_loader,
+        optimizer,
+        lat_w,
+        k_steps,
+        args.rain_alpha,
+        args.grad_weight,
+        args.neg_weight,
+        max_batches=args.max_batches,
+        max_mem_mb=getattr(args, "max_mem_mb", 5500.0),
+    )
+    scheduler.step()
+
+    t_val0 = time.perf_counter()
+    val_loss = _evaluate_val_loss(
+        model,
+        val_ds,
+        lat_w,
+        rollout_steps=k_steps,
+        batch_size=args.batch_size,
+        rain_alpha=args.rain_alpha,
+        grad_weight=args.grad_weight,
+        neg_weight=args.neg_weight,
+    )
+    val_metrics = evaluate_full(
+        model,
+        args.nc,
+        stats,
+        split="val",
+        steps=SCORE_STEPS,
+        batch_size=args.batch_size,
+        climatology=train_clim,
+        dataset=val_ds,
+    )
+    val_elapsed_s = time.perf_counter() - t_val0
+    total_elapsed_s = time.perf_counter() - t_ep0
+    rss_mb = _get_process_memory_mb()
+
+    csi_summary = {
+        lead: {
+            "csi_model": m["csi_model"],
+            "csi_persist": m["csi_persist"],
+            "csi_clim": m["csi_clim"],
+            "csi_skill": m["csi_skill"],
+            "mean_ss_vs_persist": m["mean_ss_vs_persist"],
+            "mean_ss_vs_clim": m["mean_ss_vs_clim"],
+            "mean_ss_vs_best_ref": m["mean_ss_vs_best_ref"],
+        }
+        for lead, m in val_metrics["leads"].items()
+    }
+
+    record = {
+        "stage": stage_name,
+        "epoch": epoch,
+        "k_steps": k_steps,
+        "train_elapsed_s": timing["train_elapsed_s"],
+        "val_elapsed_s": round(val_elapsed_s, 3),
+        "elapsed_s": round(total_elapsed_s, 2),
+        "batches_run": timing["batches_run"],
+        "total_batches_in_epoch": timing["total_batches_in_epoch"],
+        "batches_per_sec": timing["batches_per_sec"],
+        "est_full_epoch_s": timing["est_full_epoch_s"],
+        "memory": rss_mb,
+        "train_loss": tr_loss,
+        "val_loss": val_loss,
+        "val_day4_ss_vs_persist": val_metrics["day4_ss_vs_persist"],
+        "val_mean_ss_vs_persist": val_metrics["mean_ss_vs_persist"],
+        "val_mean_ss_vs_clim": val_metrics["mean_ss_vs_clim"],
+        "val_mean_ss_vs_best_ref": val_metrics["mean_ss_vs_best_ref"],
+        "val_mean_csi_skill": val_metrics["mean_csi_skill"],
+        "val_leads_summary": csi_summary,
+        "val_invalid_windows": val_metrics["invalid_windows"],
+        "shock_validity_ok": val_metrics["shock_validity_ok"],
+        "null_shock_ok": val_metrics["null_shock_ok"],
+    }
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    print(json.dumps(record), flush=True)
+
+    score = float(val_metrics["mean_ss_vs_persist"])
+    if val_metrics["invalid_windows"] == 0 and val_metrics["shock_validity_ok"] and score > best_score:
+        best_score = score
+        _save_checkpoint(out_dir / "best.pt", model, epoch, stage_name, val_metrics, args)
+    _save_checkpoint(out_dir / "latest.pt", model, epoch, stage_name, val_metrics, args)
+    return best_score
 
 
 def train(args: argparse.Namespace) -> None:
@@ -363,11 +571,14 @@ def train(args: argparse.Namespace) -> None:
     log_path = out_dir / "history.jsonl"
 
     stats = load_stats(args.stats)
+    train_clim = compute_train_climatology(
+        args.nc, split="train", chunk_cache_mb=args.chunk_cache_mb
+    )
     train_ds = ForkcastNetCDFDataset(
         args.nc, split="train", rollout_steps=1, chunk_cache_mb=args.chunk_cache_mb
     )
     val_ds = ForkcastNetCDFDataset(
-        args.nc, split="val", rollout_steps=10, chunk_cache_mb=args.chunk_cache_mb
+        args.nc, split="val", rollout_steps=SCORE_STEPS, chunk_cache_mb=args.chunk_cache_mb
     )
 
     try:
@@ -377,6 +588,14 @@ def train(args: argparse.Namespace) -> None:
             static_fields=train_ds.static,
             hidden_channels=int(args.hidden),
         )
+        if getattr(args, "resume_ckpt", None):
+            ckpt_path = Path(args.resume_ckpt)
+            if not ckpt_path.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(ckpt["model_state_dict"])
+            print(f"Loaded checkpoint from {ckpt_path}", flush=True)
+
         lat_w = _lat_weight_tensor()
         best_score = -float("inf")
 
@@ -397,41 +616,31 @@ def train(args: argparse.Namespace) -> None:
         )
 
         for epoch in range(1, args.epochs_stage1 + 1):
-            t0 = time.perf_counter()
-            tr_loss = _run_epoch(
-                model, loader1, opt1, lat_w, 1, args.rain_alpha, args.grad_weight, args.neg_weight,
-                max_batches=args.max_batches,
+            best_score = _execute_and_log_epoch(
+                stage_name="stage1_k1",
+                epoch=epoch,
+                k_steps=1,
+                model=model,
+                train_loader=loader1,
+                val_ds=val_ds,
+                train_clim=train_clim,
+                stats=stats,
+                optimizer=opt1,
+                scheduler=sched1,
+                lat_w=lat_w,
+                args=args,
+                out_dir=out_dir,
+                log_path=log_path,
+                best_score=best_score,
             )
-            sched1.step()
-            val_metrics = evaluate_vs_persistence(
-                model, val_ds, steps=10, batch_size=args.batch_size
-            )
-            elapsed = time.perf_counter() - t0
-            record = {
-                "stage": "stage1_k1",
-                "epoch": epoch,
-                "elapsed_s": round(elapsed, 2),
-                "train_loss": tr_loss,
-                "val_day4_ss": val_metrics["day4_ss_vs_persist"],
-                "val_mean_ss": val_metrics["mean_ss_vs_persist"],
-                "val_invalid_windows": val_metrics["invalid_windows"],
-            }
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-            print(json.dumps(record), flush=True)
-
-            score = float(val_metrics["mean_ss_vs_persist"])
-            if val_metrics["invalid_windows"] == 0 and score > best_score:
-                best_score = score
-                _save_checkpoint(out_dir / "best.pt", model, epoch, "stage1_k1", val_metrics, args)
-            _save_checkpoint(out_dir / "latest.pt", model, epoch, "stage1_k1", val_metrics, args)
 
         # Stage 2: Autoregressive multi-step fine-tuning curriculum
         if args.epochs_stage2 > 0:
-            best_ckpt = out_dir / "best.pt"
-            if best_ckpt.exists():
-                ckpt = torch.load(best_ckpt, map_location="cpu", weights_only=False)
-                model.load_state_dict(ckpt["model_state_dict"])
+            if not getattr(args, "resume_ckpt", None):
+                best_ckpt = out_dir / "best.pt"
+                if best_ckpt.exists():
+                    ckpt = torch.load(best_ckpt, map_location="cpu", weights_only=False)
+                    model.load_state_dict(ckpt["model_state_dict"])
 
             schedule = [int(x) for x in str(args.stage2_schedule).split(",") if x.strip()]
             opt2 = torch.optim.AdamW(
@@ -442,7 +651,6 @@ def train(args: argparse.Namespace) -> None:
             )
 
             for epoch in range(1, args.epochs_stage2 + 1):
-                # Map epoch across curriculum horizons
                 stage_idx = min(
                     len(schedule) - 1,
                     int((epoch - 1) * len(schedule) / max(args.epochs_stage2, 1)),
@@ -453,44 +661,22 @@ def train(args: argparse.Namespace) -> None:
                     train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0
                 )
 
-                t0 = time.perf_counter()
-                tr_loss = _run_epoch(
-                    model,
-                    loader_k,
-                    opt2,
-                    lat_w,
-                    k_steps,
-                    args.rain_alpha,
-                    args.grad_weight,
-                    args.neg_weight,
-                    max_batches=args.max_batches,
-                )
-                sched2.step()
-                val_metrics = evaluate_vs_persistence(
-                    model, val_ds, steps=10, batch_size=args.batch_size
-                )
-                elapsed = time.perf_counter() - t0
-                record = {
-                    "stage": f"stage2_k{k_steps}",
-                    "epoch": epoch,
-                    "elapsed_s": round(elapsed, 2),
-                    "train_loss": tr_loss,
-                    "val_day4_ss": val_metrics["day4_ss_vs_persist"],
-                    "val_mean_ss": val_metrics["mean_ss_vs_persist"],
-                    "val_invalid_windows": val_metrics["invalid_windows"],
-                }
-                with log_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
-                print(json.dumps(record), flush=True)
-
-                score = float(val_metrics["mean_ss_vs_persist"])
-                if val_metrics["invalid_windows"] == 0 and score > best_score:
-                    best_score = score
-                    _save_checkpoint(
-                        out_dir / "best.pt", model, epoch, f"stage2_k{k_steps}", val_metrics, args
-                    )
-                _save_checkpoint(
-                    out_dir / "latest.pt", model, epoch, f"stage2_k{k_steps}", val_metrics, args
+                best_score = _execute_and_log_epoch(
+                    stage_name=f"stage2_k{k_steps}",
+                    epoch=epoch,
+                    k_steps=k_steps,
+                    model=model,
+                    train_loader=loader_k,
+                    val_ds=val_ds,
+                    train_clim=train_clim,
+                    stats=stats,
+                    optimizer=opt2,
+                    scheduler=sched2,
+                    lat_w=lat_w,
+                    args=args,
+                    out_dir=out_dir,
+                    log_path=log_path,
+                    best_score=best_score,
                 )
     finally:
         train_ds.close()
@@ -517,6 +703,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max-batches", type=int, default=0, help="Cap batches per epoch (0=unlimited)")
+    ap.add_argument("--resume-ckpt", default=None, help="Path to checkpoint to resume weights from")
+    ap.add_argument("--max-mem-mb", type=float, default=5500.0, help="Abort training if working set memory exceeds this (MB)")
     ap.add_argument("--smoke-test", action="store_true")
     return ap
 
