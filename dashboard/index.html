@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FORKCAST — Fork the Forecast</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <script defer src="/dashboard/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark">F</div>
+    <div>
+      <div class="brand">FORKCAST</div>
+      <div class="tagline">Fork the Forecast. See the Impact.</div>
+    </div>
+    <div class="status-wrap"><span id="status-dot" class="dot"></span><span id="status-text">Checking model…</span></div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">MULTIVERSE OF MONSOON · INDIA</p>
+      <h1>Explore alternate weather futures.</h1>
+      <p class="sub">Run the baseline forecast, introduce a localized physical shock, and compare the model's live outputs.</p>
+    </section>
+
+    <section class="panel setup">
+      <div class="section-head"><div><p class="eyebrow">01 / INPUT</p><h2>Load a three-day weather window</h2></div><span class="pill">Physical units</span></div>
+      <label class="field">Input window JSON
+        <input id="window-file" type="file" accept=".json,application/json">
+      </label>
+      <p class="hint">JSON format: {"init_states":[3×6×32×36 nested numbers],"doy_sincos":[sin,cos]}. Use a real exported sample window; no forecast is generated from placeholder data.</p>
+      <div class="controls">
+        <label class="field">Forecast steps
+          <input id="steps" type="number" min="1" max="14" value="10">
+        </label>
+        <label class="field">Variable to display
+          <select id="channel">
+            <option value="0">Temperature · t2m (K)</option>
+            <option value="1">Precipitation · tp (mm/day)</option>
+            <option value="2">Eastward wind · u10 (m/s)</option>
+            <option value="3">Northward wind · v10 (m/s)</option>
+            <option value="4">Pressure · msl (Pa)</option>
+            <option value="5">Water vapour · tcwv (kg/m²)</option>
+          </select>
+        </label>
+        <label class="field">Forecast day
+          <input id="day" type="number" min="1" max="10" value="1">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="run-baseline" class="button primary">Run baseline forecast</button>
+        <span id="baseline-time" class="hint"></span>
+      </div>
+    </section>
+
+    <section class="panel shock">
+      <div class="section-head"><div><p class="eyebrow">02 / COUNTERFACTUAL</p><h2>Introduce a localized shock</h2></div><span class="pill accent">What-if simulation</span></div>
+      <div class="controls">
+        <label class="field">Weather variable
+          <select id="shock-channel">
+            <option value="0">Temperature · t2m (K)</option>
+            <option value="1">Precipitation · tp (mm/day)</option>
+            <option value="2">Eastward wind · u10 (m/s)</option>
+            <option value="3">Northward wind · v10 (m/s)</option>
+            <option value="4">Pressure · msl (Pa)</option>
+            <option value="5">Water vapour · tcwv (kg/m²)</option>
+          </select>
+        </label>
+        <label class="field">Delta (physical units)
+          <input id="shock-delta" type="number" step="any" value="3">
+        </label>
+        <label class="field">Latitude start / end (°)
+          <div class="pair"><input id="lat-start" type="number" value="8" step="1"><input id="lat-end" type="number" value="20" step="1"></div>
+        </label>
+        <label class="field">Longitude start / end (°)
+          <div class="pair"><input id="lon-start" type="number" value="82" step="1"><input id="lon-end" type="number" value="94" step="1"></div>
+        </label>
+      </div>
+      <p class="hint">Grid cell centres: latitude 6.5°–37.5° north; longitude 65.5°–100.5° east. The shock is added once to the last input day before simulation.</p>
+      <div class="actions">
+        <button id="run-shock" class="button secondary" disabled>Run shocked forecast</button>
+        <button id="run-zero" class="button ghost" disabled>Verify zero shock</button>
+        <span id="shock-time" class="hint"></span>
+      </div>
+    </section>
+
+    <section class="panel results">
+      <div class="section-head"><div><p class="eyebrow">03 / LIVE MODEL OUTPUT</p><h2>Timeline comparison</h2></div><span id="result-label" class="pill">Waiting for a run</span></div>
+      <div class="controls result-controls">
+        <label class="field">View
+          <select id="view-mode"><option value="baseline">Baseline</option><option value="shock">Shocked</option><option value="difference">Difference (shock − baseline)</option></select>
+        </label>
+      </div>
+      <div class="map-wrap"><canvas id="map" width="720" height="640" aria-label="32 by 36 India weather grid"></canvas></div>
+      <div class="legend"><span>Lower</span><div class="gradient"></div><span>Higher</span></div>
+      <div id="metrics" class="metrics"><div class="metric"><span>Baseline</span><strong>—</strong></div><div class="metric"><span>Counterfactual</span><strong>—</strong></div><div class="metric"><span>Max |difference|</span><strong>—</strong></div></div>
+      <p id="message" class="message" role="status">Load a real input window JSON file to begin.</p>
+    </section>
+
+    <footer>Experimental scenario simulator · Not an operational weather-warning service · Forecast maps are rendered from live /simulate responses.</footer>
+  </main>
+</body>
+</html>
