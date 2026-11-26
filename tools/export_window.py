@@ -1,7 +1,7 @@
 """Export a real three-day input window for the local dashboard.
 
 Example:
-  python tools/export_window.py --nc C:\FORKCAST_DATA\india_climate_train.nc --last-day 2021-08-15 --out C:\FORKCAST_DATA\demo_window.json
+  python tools/export_window.py --nc C:\FORKCAST_DATA\india_climate_train.nc --last-day YYYY-MM-DD --out C:\FORKCAST_DATA\demo_window.json
 
 The JSON output must stay outside the Git repository. It contains only the selected input
 window, not a historical archive or forecast lookup table.
