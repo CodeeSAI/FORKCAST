@@ -25,7 +25,7 @@ from src.evaluate import (
     validity,
 )
 from src.model import MAX_STEPS, OROGRAPHY_SCALE, SCORE_STEPS, ForkcastResCNN
-from src.train import _save_checkpoint, counterfactual_response_loss
+from src.train import _can_promote_checkpoint, _save_checkpoint, counterfactual_response_loss
 
 NC_PATH = Path(r"C:\FORKCAST_DATA\india_climate_train.nc")
 STATS_PATH = Path(r"C:\FORKCAST_DATA\stats.json")
@@ -244,6 +244,28 @@ class TestForkcastFixesAndContracts(unittest.TestCase):
             self.assertLessEqual(float(arr[:, 0].max()), 333.15)
             self.assertGreaterEqual(float(arr[:, 1].min()), 0.0)
             self.assertGreaterEqual(float(arr[:, 5].min()), 0.0)
+
+    def test_checkpoint_promotion_requires_both_propagating_shocks(self) -> None:
+        good = {
+            "day4_ss_vs_persist": 0.01,
+            "invalid_windows": 0,
+            "shock_validity_ok": True,
+            "null_shock_ok": True,
+            "warm_ocean": {"nonzero": True, "localized": True, "propagates": True, "stable": True},
+            "monsoon_stall": {"nonzero": True, "localized": True, "propagates": True, "stable": True},
+        }
+        self.assertTrue(_can_promote_checkpoint(good, 10.0, 9.0))
+
+        for failed_gate in ("nonzero", "localized", "propagates", "stable"):
+            candidate = {**good, "warm_ocean": {**good["warm_ocean"], failed_gate: False}}
+            self.assertFalse(_can_promote_checkpoint(candidate, 10.0, 9.0))
+            candidate = {**good, "monsoon_stall": {**good["monsoon_stall"], failed_gate: False}}
+            self.assertFalse(_can_promote_checkpoint(candidate, 10.0, 9.0))
+
+        self.assertFalse(_can_promote_checkpoint({**good, "null_shock_ok": False}, 10.0, 9.0))
+        self.assertFalse(_can_promote_checkpoint({**good, "invalid_windows": 1}, 10.0, 9.0))
+        self.assertFalse(_can_promote_checkpoint({**good, "day4_ss_vs_persist": -0.01}, 10.0, 9.0))
+        self.assertFalse(_can_promote_checkpoint(good, 8.0, 9.0))
 
     def test_counterfactual_response_loss_is_finite_and_differentiable(self) -> None:
         model = _make_dummy_model()
