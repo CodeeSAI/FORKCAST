@@ -23,9 +23,16 @@ from src.dataset import (
 from src.evaluate import (
     BOX_ARABIAN_SEA,
     BOX_BAY_OF_BENGAL,
+    DILATE,
+    LOCAL_MIN_FRAC,
+    MAX_SPEED_CELLS_PER_DAY,
+    NONZERO_MIN,
+    STABLE_MAX_STD,
+    box_mask,
     causality_checks,
     evaluate_full,
     make_shock,
+    near_mask,
     validity,
 )
 from src.model import SCORE_STEPS, ForkcastResCNN
@@ -141,6 +148,79 @@ def compute_rainfall_aware_loss(
     return total, parts
 
 
+def counterfactual_response_loss(
+    model: ForkcastResCNN,
+    init_states: torch.Tensor,
+    doy_sc: torch.Tensor,
+    baseline_phys: torch.Tensor,
+    shock_name: str,
+) -> torch.Tensor:
+    """Contract-aligned training regularizer for learned, local shock propagation.
+
+    The alternate rollout is produced by the same trained network. This loss does
+    not insert a forecast pattern or alter inference outputs: it trains the model
+    to retain a local Day-1 response and develop a stable, spatially reachable
+    response outside the official shock neighbourhood by Days 4-8.
+    """
+    if shock_name not in ("warm_ocean", "monsoon_stall"):
+        raise ValueError(f"Unsupported counterfactual shock: {shock_name!r}")
+    if init_states.ndim != 5 or init_states.shape[1:] != (3, 6, 32, 36):
+        raise ValueError(f"init_states must have shape [B,3,6,32,36], got {tuple(init_states.shape)}")
+    if baseline_phys.ndim != 5 or baseline_phys.shape[1] < 8:
+        raise ValueError("baseline_phys must contain at least 8 forecast days")
+
+    last_np = init_states[:, -1].detach().cpu().numpy()
+    perturb_np = np.stack([make_shock(shock_name, state) for state in last_np], axis=0)
+    perturb = torch.as_tensor(perturb_np, dtype=init_states.dtype, device=init_states.device)
+    shocked_phys = model.rollout(init_states, doy_sc, steps=8, perturbation=perturb)
+    delta_norm = (shocked_phys - baseline_phys[:, :8]) / model.std.reshape(1, 1, 6, 1, 1)
+    energy = delta_norm.square().sum(dim=2)  # [B, 8, 32, 36]
+
+    box = BOX_BAY_OF_BENGAL if shock_name == "warm_ocean" else BOX_ARABIAN_SEA
+    near_np = near_mask(box, dilate=DILATE)
+    near = torch.as_tensor(near_np, dtype=energy.dtype, device=energy.device).reshape(1, 1, 32, 36)
+    outside = 1.0 - near
+
+    day1_total = energy[:, 0].sum(dim=(-2, -1))
+    day1_near = (energy[:, 0] * near[:, 0]).sum(dim=(-2, -1))
+    local_fraction = day1_near / (day1_total + 1e-12)
+    local_loss = F.relu(float(LOCAL_MIN_FRAC) - local_fraction).square()
+
+    outside_energy = (energy * outside).sum(dim=(-2, -1))
+    day1_outside = outside_energy[:, 0]
+    days4_8_outside = outside_energy[:, 3:8].mean(dim=1)
+    max_total_energy = energy.sum(dim=(-2, -1)).amax(dim=1)
+    required_outside = 0.02 * max_total_energy
+    threshold_loss = F.relu(required_outside - days4_8_outside) / (required_outside + 1e-8)
+    growth_ratio = days4_8_outside / (day1_outside + 1e-8)
+    growth_loss = F.relu(1.5 - growth_ratio) / 1.5
+
+    max_response_std = delta_norm.abs().amax(dim=(1, 2, 3, 4))
+    nonzero_loss = F.relu(float(NONZERO_MIN) - max_response_std) / float(NONZERO_MIN)
+    stable_loss = F.relu(max_response_std - float(STABLE_MAX_STD)) / float(STABLE_MAX_STD)
+
+    core_np = box_mask(box)
+    iy, ix = np.indices(core_np.shape)
+    cy, cx = np.where(core_np)
+    distance = np.sqrt((iy[..., None] - cy) ** 2 + (ix[..., None] - cx) ** 2).min(axis=-1)
+    far_masks_np = np.stack([
+        distance > (float(DILATE) + float(MAX_SPEED_CELLS_PER_DAY) * (day + 1))
+        for day in range(8)
+    ], axis=0)
+    far_masks = torch.as_tensor(far_masks_np, dtype=energy.dtype, device=energy.device).unsqueeze(0)
+    far_fraction = (energy * far_masks).sum(dim=(-2, -1)) / (energy.sum(dim=(-2, -1)) + 1e-12)
+    teleport_loss = F.relu(far_fraction.amax(dim=1) - 0.05).square()
+
+    return (
+        local_loss
+        + threshold_loss
+        + growth_loss
+        + nonzero_loss
+        + stable_loss
+        + teleport_loss
+    ).mean()
+
+
 def _run_epoch(
     model: ForkcastResCNN,
     loader: DataLoader,
@@ -150,12 +230,13 @@ def _run_epoch(
     rain_alpha: float,
     grad_weight: float,
     neg_weight: float,
+    shock_weight: float = 0.0,
     max_grad_norm: float = 1.0,
     max_batches: int = 0,
     max_mem_mb: float = 5500.0,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
     model.train()
-    sums = {"total": 0.0, "mse": 0.0, "grad": 0.0, "neg": 0.0}
+    sums = {"total": 0.0, "mse": 0.0, "grad": 0.0, "neg": 0.0, "shock_causality": 0.0}
     n_batches = 0
     total_batches = len(loader)
     t0 = time.perf_counter()
@@ -176,6 +257,16 @@ def _run_epoch(
             grad_weight=grad_weight,
             neg_weight=neg_weight,
         )
+        shock_penalty = loss.new_zeros(())
+        if shock_weight > 0.0 and rollout_steps >= 8:
+            shock_name = "warm_ocean" if n_batches % 2 == 0 else "monsoon_stall"
+            shock_penalty = counterfactual_response_loss(
+                model, init_states, doy_sc, pred_phys, shock_name
+            )
+            loss = loss + float(shock_weight) * shock_penalty
+        parts = dict(parts)
+        parts["shock_causality"] = float(shock_penalty.detach().item())
+        parts["total"] = float(loss.detach().item())
         if not torch.isfinite(loss):
             raise FloatingPointError(
                 f"Non-finite loss encountered at batch {n_batches + 1}: {parts}"
@@ -530,6 +621,7 @@ def _execute_and_log_epoch(
         args.rain_alpha,
         args.grad_weight,
         args.neg_weight,
+        shock_weight=getattr(args, "shock_weight", 0.0),
         max_batches=args.max_batches,
         max_mem_mb=getattr(args, "max_mem_mb", 5500.0),
     )
@@ -762,6 +854,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--rain-alpha", type=float, default=1.5)
     ap.add_argument("--grad-weight", type=float, default=0.15)
     ap.add_argument("--neg-weight", type=float, default=0.05)
+    ap.add_argument(
+        "--shock-weight",
+        type=float,
+        default=0.0,
+        help="Weight for official localized-to-outward counterfactual response loss (active for K>=8)",
+    )
     ap.add_argument("--chunk-cache-mb", type=int, default=192)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=42)
