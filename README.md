@@ -81,6 +81,8 @@ python -m src.train --nc C:\FORKCAST_DATA\india_climate_train.nc --stats C:\FORK
 
 To resume from a checkpoint, use **--resume-ckpt** and give a separate **--out-dir** so earlier runs are preserved. Keep all training artifacts outside the Git repository.
 
+For an optional contract-aligned counterfactual training objective, pass **--shock-weight 0.1** with an autoregressive horizon of at least 8 steps. It alternates the organiser-defined warm-ocean and monsoon-stall perturbations on live training windows and regularizes the same model's response for Day-1 locality, Day-4-to-8 outward growth, spatial reachability and stability. It does not inject forecast values or alter inference-time outputs. The default is **0**; compare validation skill and all official shock checks before promoting any resulting checkpoint. This auxiliary objective has not yet been validated on a completed training run.
+
 ## Tests and validation
 
 ~~~powershell
