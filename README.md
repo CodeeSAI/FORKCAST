@@ -50,7 +50,7 @@ For inference/submission, place the selected trained checkpoint at **weights/mod
 
 The checkpoint must contain **model_state_dict**, including the model's **mean**, **std**, **static_raw** and **static_preprocessed** buffers. The server reconstructs the model and static inputs from those embedded buffers; it does not read the raw NetCDF file at startup.
 
-**Current readiness:** weights/model.pt is not included in this source-only commit. Until a validated trained checkpoint is copied to that path, /health and /simulate return HTTP 503 by design. The server does not substitute a persistence forecast.
+**Current readiness:** the repository contains a trained checkpoint at weights/model.pt. The currently selected checkpoint is the K=10 monsoon fine-tune (200-batch run). It is a provisional candidate, not a fully compliant final model: it passed the local API contract checks and finite/physical-output checks, but the two required counterfactual scenarios did not pass the outward-propagation diagnostic. Do not describe it as fully validated or competition-ready until the official evaluator is rerun against the exact committed checkpoint. The server does not substitute a persistence forecast.
 
 ## Local setup (Windows PowerShell)
 
@@ -117,9 +117,9 @@ Replace YYYY-MM-DD with a date present in the dataset. Keep the generated JSON o
 
 ## Evaluation and known limitations
 
-The previous local K=1 and K=4 pilot reports showed improvement over persistence, but K=4 still had negative mean skill versus the best reference and did not pass the official outward-shock energy-growth gate for both nonzero shocks. These are pilot results, not final holdout or hidden-test results.
+The current provisional K=10 monsoon fine-tune was evaluated on 719 validation windows with zero invalid windows. Recorded validation aggregates: mean skill versus persistence **+0.139**, mean skill versus training climatology **+0.080**, and mean heavy-rain CSI skill **+0.054**. Day-8 precipitation spatial-variance ratio was **0.395**, slightly below the 0.40 anti-blur threshold. Although aggregate climatology skill was positive, mean skill versus climatology was negative at Days 4 and 8. The two official counterfactual shocks were finite, nonzero and localized, but neither passed the outward-propagation test. These are validation results for this checkpoint, not holdout or hidden-test results.
 
-Do not claim qualification, official validator success, or final accuracy without running the current checkpoint against the official scorer and all eight request cases. Keep the 2021 holdout separate until model selection is complete.
+The checkpoint passed the local schema validator and nine repository tests in the recorded local run. Re-run both against the exact final commit and checkpoint before submission. Do not claim qualification, complete shock compliance, or final accuracy without running the official scorer and all required request cases. Keep the 2021 holdout separate until model selection is complete.
 
 ## Ground rules
 
