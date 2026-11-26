@@ -454,6 +454,54 @@ def run_smoke_test(args: argparse.Namespace) -> Dict[str, object]:
         holdout_ds.close()
 
 
+def competition_proxy_score(val_metrics: Dict[str, object]) -> Dict[str, float]:
+    """Approximate the model-dependent 70-point organiser score for checkpoint selection.
+
+    This uses validation aggregates as a selection proxy; the official scorer still
+    decides the final score on its five hidden weather windows. It deliberately
+    scores RMSE against the better of persistence/climatology, heavy-rain CSI,
+    Day-8 anti-blur, and both shock responses rather than persistence skill alone.
+    """
+    ss_value = val_metrics.get("mean_ss_vs_best_ref")
+    csi_value = val_metrics.get("mean_csi_skill")
+    ss = float(ss_value) if ss_value is not None and np.isfinite(float(ss_value)) else float("nan")
+    csi_skill = float(csi_value) if csi_value is not None and np.isfinite(float(csi_value)) else float("nan")
+
+    rmse_points = 30.0 * float(np.clip(ss / 0.12, 0.0, 1.0)) if np.isfinite(ss) else 0.0
+    csi_points = 15.0 * float(np.clip(csi_skill / 0.10, 0.0, 1.0)) if np.isfinite(csi_skill) else 0.0
+
+    day8_ratios = val_metrics.get("leads", {}).get("day_8", {}).get("variance_ratio", {})
+    blur_scores = []
+    for channel in CHANNELS:
+        value = day8_ratios.get(channel)
+        if value is None or not np.isfinite(float(value)):
+            blur_scores.append(0.0)
+        else:
+            ratio = float(value)
+            blur_scores.append(float(np.clip(ratio / 0.40, 0.0, 1.0) * (ratio <= 2.50)))
+    anti_blur_points = 10.0 * float(np.mean(blur_scores))
+
+    shock_points = 0.0
+    for name in ("warm_ocean", "monsoon_stall"):
+        shock = val_metrics.get(name, {})
+        quarters = 0
+        if shock.get("nonzero", False):
+            quarters += 1
+            if shock.get("localized", False):
+                quarters += 1 + int(bool(shock.get("propagates", False))) + int(bool(shock.get("stable", False)))
+        shock_points += 7.5 * quarters / 4.0
+    if not bool(val_metrics.get("null_shock_ok", False)):
+        shock_points *= 0.5
+
+    return {
+        "total": rmse_points + csi_points + anti_blur_points + shock_points,
+        "rmse_points": rmse_points,
+        "csi_points": csi_points,
+        "anti_blur_points": anti_blur_points,
+        "shock_points": shock_points,
+    }
+
+
 def _execute_and_log_epoch(
     stage_name: str,
     epoch: int,
@@ -548,13 +596,28 @@ def _execute_and_log_epoch(
         "val_invalid_windows": val_metrics["invalid_windows"],
         "shock_validity_ok": val_metrics["shock_validity_ok"],
         "null_shock_ok": val_metrics["null_shock_ok"],
+        "val_competition_proxy": competition_proxy_score(val_metrics),
     }
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     print(json.dumps(record), flush=True)
 
-    score = float(val_metrics["mean_ss_vs_persist"])
-    if val_metrics["invalid_windows"] == 0 and val_metrics["shock_validity_ok"] and score > best_score:
+    score_parts = competition_proxy_score(val_metrics)
+    score = float(score_parts["total"])
+    day4_skill = val_metrics.get("day4_ss_vs_persist")
+    day4_gate = day4_skill is not None and np.isfinite(float(day4_skill)) and float(day4_skill) > 0.0
+    localized_shock_gate = any(
+        bool(val_metrics.get(name, {}).get("nonzero", False))
+        and bool(val_metrics.get(name, {}).get("localized", False))
+        for name in ("warm_ocean", "monsoon_stall")
+    )
+    if (
+        val_metrics["invalid_windows"] == 0
+        and val_metrics["shock_validity_ok"]
+        and day4_gate
+        and localized_shock_gate
+        and score > best_score
+    ):
         best_score = score
         _save_checkpoint(out_dir / "best.pt", model, epoch, stage_name, val_metrics, args)
     _save_checkpoint(out_dir / "latest.pt", model, epoch, stage_name, val_metrics, args)
