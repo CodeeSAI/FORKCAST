@@ -23,6 +23,31 @@
   const ctx = map.getContext("2d");
   const canvasWidth = map.width;
   const canvasHeight = map.height;
+  const overviewMap = $("overview-map");
+  const overviewCtx = overviewMap.getContext("2d");
+  const overviewWidth = overviewMap.width;
+  const overviewHeight = overviewMap.height;
+  // Schematic coastline in the fixed 65.5-100.5E, 6.5-37.5N model domain.
+  const indiaOutline = [
+    [75.5, 37.3], [76.2, 36.3], [77.2, 35.5], [78.0, 34.6], [78.8, 33.6],
+    [79.1, 32.5], [78.7, 31.4], [78.5, 30.5], [79.0, 29.7], [79.8, 29.2],
+    [80.8, 28.9], [81.7, 28.5], [82.6, 27.8], [83.6, 27.7], [84.5, 27.9],
+    [85.5, 27.7], [86.5, 27.5], [87.5, 27.2], [88.3, 26.9], [89.0, 26.5],
+    [89.7, 26.1], [90.5, 26.0], [91.3, 25.9], [92.0, 26.4], [92.8, 27.0],
+    [93.7, 27.4], [94.6, 27.8], [95.5, 28.1], [96.4, 28.3], [97.4, 28.1],
+    [97.1, 27.2], [96.3, 26.4], [95.3, 25.7], [94.7, 24.8], [94.2, 23.6],
+    [93.2, 22.1], [92.4, 21.8], [92.4, 23.3], [91.7, 24.0], [90.8, 24.1],
+    [90.0, 23.8], [89.6, 22.8], [89.0, 22.0], [88.2, 21.8], [87.6, 21.8],
+    [86.8, 20.8], [85.8, 19.8], [84.6, 19.0], [83.7, 17.5], [82.5, 16.8],
+    [81.5, 15.8], [80.5, 14.5], [80.2, 12.9], [80.1, 11.4], [79.5, 10.3],
+    [78.6, 8.5], [77.5, 8.1], [76.5, 8.5], [75.7, 9.4], [75.1, 10.6],
+    [74.6, 12.0], [74.1, 13.3], [73.7, 14.8], [73.3, 16.5], [72.9, 18.3],
+    [72.6, 19.8], [72.2, 20.8], [71.3, 21.8], [70.2, 22.5], [69.2, 22.8],
+    [68.7, 23.2], [68.1, 23.8], [68.1, 24.6], [68.5, 25.5], [69.2, 26.3],
+    [70.1, 27.1], [71.1, 27.8], [72.0, 28.5], [72.9, 29.4], [73.8, 30.4],
+    [74.8, 31.5], [75.3, 32.5], [74.8, 33.6], [74.5, 34.8], [74.8, 35.8],
+    [75.5, 37.3]
+  ];
   let dragStart = null;
 
   function setMessage(text, kind) {
@@ -292,34 +317,64 @@
     $(id).textContent = Number.isFinite(value) ? formatValue(value) + " " + unit : "—";
   }
 
-  function drawGridBase() {
-    ctx.fillStyle = "#172020";
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-    ctx.strokeStyle = "rgba(240, 235, 220, .16)";
-    ctx.lineWidth = 1;
+  function drawGridBase(target, width, height) {
+    target.fillStyle = "#172020";
+    target.fillRect(0, 0, width, height);
+    target.strokeStyle = "rgba(240, 235, 220, .16)";
+    target.lineWidth = Math.max(.6, width / canvasWidth);
     for (let x = 0; x <= 36; x += 6) {
-      const px = x * canvasWidth / 36;
-      ctx.beginPath();
-      ctx.moveTo(px, 0);
-      ctx.lineTo(px, canvasHeight);
-      ctx.stroke();
+      const px = x * width / 36;
+      target.beginPath();
+      target.moveTo(px, 0);
+      target.lineTo(px, height);
+      target.stroke();
     }
     for (let y = 0; y <= 32; y += 4) {
-      const py = y * canvasHeight / 32;
-      ctx.beginPath();
-      ctx.moveTo(0, py);
-      ctx.lineTo(canvasWidth, py);
-      ctx.stroke();
+      const py = y * height / 32;
+      target.beginPath();
+      target.moveTo(0, py);
+      target.lineTo(width, py);
+      target.stroke();
     }
   }
 
+  function drawIndiaOutline(target, width, height, fillLand) {
+    target.beginPath();
+    indiaOutline.forEach(([longitude, latitude], index) => {
+      const x = (longitude - 65.5) / 35 * width;
+      const y = (37.5 - latitude) / 31 * height;
+      if (index === 0) target.moveTo(x, y);
+      else target.lineTo(x, y);
+    });
+    target.closePath();
+    target.save();
+    if (fillLand) {
+      target.fillStyle = "rgba(248, 243, 232, .12)";
+      target.fill();
+    }
+    target.strokeStyle = "rgba(248, 243, 232, .88)";
+    target.lineWidth = Math.max(1.2, width / canvasWidth * 2.2);
+    target.shadowColor = "rgba(4, 11, 12, .5)";
+    target.shadowBlur = Math.max(1, width / canvasWidth * 3);
+    target.stroke();
+    target.restore();
+  }
+
   function draw() {
-    drawGridBase();
+    drawGridBase(ctx, canvasWidth, canvasHeight);
+    drawGridBase(overviewCtx, overviewWidth, overviewHeight);
     const mode = $("view-mode").value;
     const day = Math.max(0, Number($("day").value) - 1);
     const channel = Number($("channel").value);
     const source = mode === "shock" ? state.shock : state.baseline;
     const hasDifference = mode === "difference" && state.baseline && state.shock;
+    const hasField = Boolean(source || hasDifference);
+    drawIndiaOutline(ctx, canvasWidth, canvasHeight, !hasField);
+    drawIndiaOutline(overviewCtx, overviewWidth, overviewHeight, !hasField);
+    $("overview-status").textContent = state.baseline
+      ? (mode === "difference" ? "DIFFERENCE" : mode === "shock" ? "COUNTERFACTUAL" : "BASELINE") +
+        " / DAY " + (day + 1)
+      : state.input ? "WINDOW READY" : "AWAITING WINDOW";
 
     $("map-empty").hidden = Boolean(source || hasDifference);
     if (!source && !hasDifference) {
@@ -330,7 +385,8 @@
       $("metric-min").textContent = "—";
       $("metric-max").textContent = "—";
       $("metric-diff").textContent = "—";
-      drawSelection();
+      drawSelection(ctx, canvasWidth, canvasHeight);
+      drawSelection(overviewCtx, overviewWidth, overviewHeight);
       return;
     }
 
@@ -361,21 +417,32 @@
       $("legend-gradient").classList.remove("difference");
     }
 
-    const cellWidth = canvasWidth / 36;
-    const cellHeight = canvasHeight / 32;
     for (let y = 0; y < 32; y++) {
       for (let x = 0; x < 36; x++) {
         const value = mode === "difference"
           ? valueAt(state.shock.rollout, day, channel, y, x) - valueAt(state.baseline.rollout, day, channel, y, x)
           : valueAt(rollout, day, channel, y, x);
         const rgb = colorAt(value, low, high, mode === "difference");
-        ctx.fillStyle = "rgb(" + rgb.join(",") + ")";
-        ctx.fillRect(x * cellWidth, (31 - y) * cellHeight, Math.ceil(cellWidth), Math.ceil(cellHeight));
+        const color = "rgb(" + rgb.join(",") + ")";
+        [ [ctx, canvasWidth, canvasHeight], [overviewCtx, overviewWidth, overviewHeight] ]
+          .forEach(([target, width, height]) => {
+            target.fillStyle = color;
+            target.fillRect(
+              x * width / 36,
+              (31 - y) * height / 32,
+              Math.ceil(width / 36),
+              Math.ceil(height / 32)
+            );
+          });
       }
     }
 
-    drawGridLines(cellWidth, cellHeight);
-    drawSelection();
+    drawGridLines(ctx, canvasWidth, canvasHeight);
+    drawGridLines(overviewCtx, overviewWidth, overviewHeight);
+    drawIndiaOutline(ctx, canvasWidth, canvasHeight, false);
+    drawIndiaOutline(overviewCtx, overviewWidth, overviewHeight, false);
+    drawSelection(ctx, canvasWidth, canvasHeight);
+    drawSelection(overviewCtx, overviewWidth, overviewHeight);
     $("result-label").textContent =
       (mode === "difference" ? "Difference" : mode === "shock" ? "Counterfactual" : "Baseline") +
       " · Day " + (day + 1);
@@ -388,36 +455,36 @@
       : "—";
   }
 
-  function drawGridLines(cellWidth, cellHeight) {
-    ctx.strokeStyle = "rgba(246, 241, 231, .28)";
-    ctx.lineWidth = 1;
+  function drawGridLines(target, width, height) {
+    target.strokeStyle = "rgba(246, 241, 231, .28)";
+    target.lineWidth = Math.max(.6, width / canvasWidth);
     for (let x = 0; x <= 36; x += 6) {
-      const px = x * cellWidth;
-      ctx.beginPath();
-      ctx.moveTo(px, 0);
-      ctx.lineTo(px, canvasHeight);
-      ctx.stroke();
+      const px = x * width / 36;
+      target.beginPath();
+      target.moveTo(px, 0);
+      target.lineTo(px, height);
+      target.stroke();
     }
     for (let y = 0; y <= 32; y += 4) {
-      const py = y * cellHeight;
-      ctx.beginPath();
-      ctx.moveTo(0, py);
-      ctx.lineTo(canvasWidth, py);
-      ctx.stroke();
+      const py = y * height / 32;
+      target.beginPath();
+      target.moveTo(0, py);
+      target.lineTo(width, py);
+      target.stroke();
     }
   }
 
-  function drawSelection() {
+  function drawSelection(target, width, height) {
     if (!state.selection) return;
-    const cellWidth = canvasWidth / 36;
-    const cellHeight = canvasHeight / 32;
+    const cellWidth = width / 36;
+    const cellHeight = height / 32;
     const minX = Math.min(state.selection.x0, state.selection.x1);
     const maxX = Math.max(state.selection.x0, state.selection.x1);
     const minY = Math.min(state.selection.y0, state.selection.y1);
     const maxY = Math.max(state.selection.y0, state.selection.y1);
-    ctx.strokeStyle = "#f4c655";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(
+    target.strokeStyle = "#f4c655";
+    target.lineWidth = Math.max(1.5, width / canvasWidth * 3);
+    target.strokeRect(
       minX * cellWidth,
       (31 - maxY) * cellHeight,
       (maxX - minX + 1) * cellWidth,

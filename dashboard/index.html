@@ -44,8 +44,16 @@ FORM: A compact field notebook with a persistent input/scenario rail and a spaci
     <section class="hero" aria-labelledby="hero-title">
       <div class="hero-copy">
         <h1 id="hero-title">See what changes<br>when the monsoon shifts.</h1>
+        <p class="hero-script">Multiverse of Monsoon</p>
         <p>Run a real weather window through FORKCAST, introduce a local atmospheric shock, and compare the two model forecasts.</p>
       </div>
+      <figure class="hero-map">
+        <canvas id="overview-map" width="360" height="320" aria-label="Schematic India outline over the live forecast grid"></canvas>
+        <figcaption class="hero-map-caption">
+          <span>INDIA FIELD / 32 × 36</span>
+          <span id="overview-status" aria-live="polite">AWAITING WINDOW</span>
+        </figcaption>
+      </figure>
       <div class="hero-note">
         <span class="hero-rule" aria-hidden="true"></span>
         <p><strong>A climate-model experiment</strong><br>Offline inference · India · 1° grid</p>
@@ -192,7 +200,7 @@ FORM: A compact field notebook with a persistent input/scenario rail and a spaci
           </label>
         </div>
 
-        <p class="grid-caption">India · 32 × 36 cells · 6.5°–37.5°N · 65.5°–100.5°E</p>
+        <p class="grid-caption">India model domain · 32 × 36 cells · outline for orientation; field includes surrounding seas</p>
         <div class="map-wrap" id="map-wrap">
           <canvas id="map" width="720" height="640" aria-label="Forecast field on a 32 by 36 India grid"></canvas>
           <div id="map-empty" class="map-empty">
