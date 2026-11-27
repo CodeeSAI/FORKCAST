@@ -119,7 +119,7 @@ Replace YYYY-MM-DD with a date present in the dataset. Keep the generated JSON o
 
 The current provisional K=10 monsoon fine-tune was evaluated on 719 validation windows with zero invalid windows. Recorded validation aggregates: mean skill versus persistence **+0.139**, mean skill versus training climatology **+0.080**, and mean heavy-rain CSI skill **+0.054**. Day-8 precipitation spatial-variance ratio was **0.395**, slightly below the 0.40 anti-blur threshold. Although aggregate climatology skill was positive, mean skill versus climatology was negative at Days 4 and 8. The two official counterfactual shocks were finite, nonzero and localized, but neither passed the outward-propagation test. These are validation results for this checkpoint, not holdout or hidden-test results.
 
-The checkpoint passed the local schema validator and nine repository tests in the recorded local run. Re-run both against the exact final commit and checkpoint before submission. Do not claim qualification, complete shock compliance, or final accuracy without running the official scorer and all required request cases. Keep the 2021 holdout separate until model selection is complete.
+The checkpoint passed the local schema validator and ten repository tests in the recorded local run. Re-run both against the exact final commit and checkpoint before submission. Do not claim qualification, complete shock compliance, or final accuracy without running the official scorer and all required request cases. Keep the 2021 holdout separate until model selection is complete.
 
 ## Ground rules
 
