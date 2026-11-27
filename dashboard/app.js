@@ -1,210 +1,646 @@
 (() => {
   "use strict";
+
   const $ = (id) => document.getElementById(id);
-  const state = { input: null, baseline: null, shock: null, zero: null };
-  const names = ["t2m", "tp", "u10", "v10", "msl", "tcwv"];
-  const units = ["K", "mm/day", "m/s", "m/s", "Pa", "kg/m²"];
-  const statusDot = $("status-dot");
-  const statusText = $("status-text");
-  const msg = $("message");
+  const channels = [
+    { name: "Temperature", code: "t2m", unit: "K" },
+    { name: "Precipitation", code: "tp", unit: "mm/day" },
+    { name: "Eastward wind", code: "u10", unit: "m/s" },
+    { name: "Northward wind", code: "v10", unit: "m/s" },
+    { name: "Pressure", code: "msl", unit: "Pa" },
+    { name: "Water vapour", code: "tcwv", unit: "kg/m²" }
+  ];
+  const state = {
+    input: null,
+    fileName: "",
+    baseline: null,
+    shock: null,
+    ready: false,
+    busy: "",
+    selection: null
+  };
   const map = $("map");
   const ctx = map.getContext("2d");
+  const canvasWidth = map.width;
+  const canvasHeight = map.height;
   let dragStart = null;
-  let selection = null;
 
-  function setMessage(text, isError = false) {
-    msg.textContent = text;
-    msg.classList.toggle("error", isError);
+  function setMessage(text, kind) {
+    const message = $("message");
+    message.textContent = text;
+    message.classList.toggle("error", kind === "error");
+    message.classList.toggle("success", kind === "success");
   }
-  function setReady(ready, text) {
-    statusDot.classList.toggle("ready", ready);
-    statusText.textContent = text;
-  }
-  function finiteTree(value, path) {
-    path = path || "array";
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) throw new Error(path + " contains a non-finite number");
-      return;
-    }
-    if (!Array.isArray(value)) throw new Error(path + " must be nested numeric lists");
-    for (let i = 0; i < value.length; i++) finiteTree(value[i], path + "[" + i + "]");
-  }
-  function shapeOf(a) {
-    const shape = []; let v = a;
-    while (Array.isArray(v)) { shape.push(v.length); v = v[0]; }
-    return shape;
-  }
-  function validateInput(data) {
-    if (!data || typeof data !== "object") throw new Error("Input JSON must be an object");
-    if (JSON.stringify(shapeOf(data.init_states)) !== JSON.stringify([3,6,32,36]))
-      throw new Error("init_states must have shape [3,6,32,36]");
-    if (!Array.isArray(data.doy_sincos) || data.doy_sincos.length !== 2 || !data.doy_sincos.every(Number.isFinite))
-      throw new Error("doy_sincos must be [sin, cos] for the last input day");
-    finiteTree(data.init_states, "init_states");
-    if (data.perturbation !== undefined && data.perturbation !== null)
-      throw new Error("Upload only init_states and doy_sincos; shocks are created by this UI");
-    return { init_states: data.init_states, doy_sincos: data.doy_sincos };
-  }
-  async function checkHealth() {
-    try {
-      const res = await fetch("/health", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok || data.status !== "ready") throw new Error((data.detail && data.detail.reason) || "Model is not ready");
-      setReady(true, "Ready · " + data.model_name);
-    } catch (err) {
-      setReady(false, "Model weights not loaded");
-      setMessage("API unavailable or model not ready: " + err.message + ". Add trained weights at weights/model.pt.", true);
-    }
-  }
-  function makeShock() {
-    const preset = $("shock-preset").value;
-    const a = Array.from({length:6}, () => Array.from({length:32}, () => Array(36).fill(0)));
-    const last = state.input.init_states[2];
 
-    if (preset === "warm_ocean" || preset === "monsoon_stall") {
-      const la0 = 8, la1 = 20;
-      const lo0 = preset === "warm_ocean" ? 82 : 65;
-      const lo1 = preset === "warm_ocean" ? 94 : 75;
-      for (let y=0; y<32; y++) for (let x=0; x<36; x++) {
-        const lat = 6.5 + y, lon = 65.5 + x;
-        if (lat < la0 || lat > la1 || lon < lo0 || lon > lo1) continue;
-        if (preset === "warm_ocean") {
-          a[0][y][x] = 3.0;
-          a[5][y][x] = 0.15 * last[5][y][x];
-        } else {
-          a[2][y][x] = -0.40 * last[2][y][x];
-          a[3][y][x] = -0.40 * last[3][y][x];
+  function setApiStatus(ready, text) {
+    state.ready = ready;
+    $("status-dot").classList.toggle("ready", ready);
+    $("status-text").textContent = text;
+  }
+
+  function detailMessage(data, fallback) {
+    const detail = data && data.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail.reason === "string") return detail.reason;
+    return fallback;
+  }
+
+  function assertShapeAndFinite(value, shape, path) {
+    if (!Array.isArray(value) || value.length !== shape[0]) {
+      throw new Error(path + " must have shape [" + shape.join(", ") + "]");
+    }
+
+    if (shape.length === 1) {
+      for (let i = 0; i < value.length; i++) {
+        if (typeof value[i] !== "number" || !Number.isFinite(value[i])) {
+          throw new Error(path + "[" + i + "] must be a finite number");
         }
       }
-      return a;
+      return;
+    }
+
+    for (let i = 0; i < value.length; i++) {
+      assertShapeAndFinite(value[i], shape.slice(1), path + "[" + i + "]");
+    }
+  }
+
+  function validateInput(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("The JSON file must contain an object.");
+    }
+    assertShapeAndFinite(data.init_states, [3, 6, 32, 36], "init_states");
+    if (!Array.isArray(data.doy_sincos) || data.doy_sincos.length !== 2 ||
+        !data.doy_sincos.every(Number.isFinite)) {
+      throw new Error("doy_sincos must contain two finite numbers: [sin, cos].");
+    }
+    if (data.perturbation !== undefined && data.perturbation !== null) {
+      throw new Error("Upload only init_states and doy_sincos. Shocks are set in this dashboard.");
+    }
+    return { init_states: data.init_states, doy_sincos: data.doy_sincos };
+  }
+
+  async function loadWindow(file) {
+    if (!file || state.busy) return;
+    state.input = null;
+    state.fileName = "";
+    state.baseline = null;
+    state.shock = null;
+    $("baseline-time").textContent = "";
+    $("shock-time").textContent = "";
+
+    try {
+      const data = JSON.parse(await file.text());
+      state.input = validateInput(data);
+      state.fileName = file.name;
+      $("file-title").textContent = file.name;
+      $("file-meta").textContent = "Window loaded · ready for a baseline";
+      $("file-drop-area").classList.add("has-file");
+      $("day").value = "1";
+      $("day").max = $("steps").value;
+      $("view-mode").value = "baseline";
+      setMessage("Window loaded. Run a baseline forecast to continue.", "success");
+    } catch (error) {
+      $("file-title").textContent = "Choose a JSON window";
+      $("file-meta").textContent = "or drop the file here";
+      $("file-drop-area").classList.remove("has-file");
+      setMessage(error.message || "Could not read this JSON window.", "error");
+    }
+
+    syncControls();
+    draw();
+  }
+
+  function syncControls() {
+    const busy = Boolean(state.busy);
+    $("window-file").disabled = busy;
+    $("steps").disabled = busy;
+    $("channel").disabled = busy;
+    $("day").disabled = busy || !state.baseline;
+    $("view-mode").disabled = busy;
+    $("shock-preset").disabled = busy;
+    $("run-baseline").disabled = busy || !state.input;
+    $("run-shock").disabled = busy || !state.baseline;
+    $("run-zero").disabled = busy || !state.baseline;
+
+    const mode = $("view-mode");
+    mode.options[1].disabled = !state.shock;
+    mode.options[2].disabled = !state.shock;
+    if ((mode.value === "shock" || mode.value === "difference") && !state.shock) {
+      mode.value = "baseline";
+    }
+
+    $("run-baseline").textContent = state.busy === "baseline"
+      ? "Running baseline…" : "Run baseline forecast";
+    $("run-shock").textContent = state.busy === "shock"
+      ? "Running counterfactual…" : "Run counterfactual";
+    $("run-zero").textContent = state.busy === "zero"
+      ? "Checking…" : "Verify zero shock";
+  }
+
+  async function checkHealth() {
+    try {
+      const response = await fetch("/health", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.status !== "ready") {
+        throw new Error(detailMessage(data, "The model is not ready."));
+      }
+      setApiStatus(true, "Ready · " + data.model_name);
+      if (!state.input) setMessage("Choose a real three-day JSON window to begin.");
+    } catch (error) {
+      setApiStatus(false, "Local model unavailable");
+      if (!state.input) {
+        setMessage("The local API is unavailable or the model is not ready. Start the FORKCAST server, then try again.", "error");
+      }
+    }
+    syncControls();
+  }
+
+  function makeShock() {
+    if (!state.input) throw new Error("Load a real weather window before running a scenario.");
+    const preset = $("shock-preset").value;
+    const perturbation = Array.from({ length: 6 }, () =>
+      Array.from({ length: 32 }, () => Array(36).fill(0)));
+    const lastDay = state.input.init_states[2];
+
+    if (preset === "warm_ocean" || preset === "monsoon_stall") {
+      const latStart = 8;
+      const latEnd = 20;
+      const lonStart = preset === "warm_ocean" ? 82 : 65;
+      const lonEnd = preset === "warm_ocean" ? 94 : 75;
+      for (let y = 0; y < 32; y++) {
+        for (let x = 0; x < 36; x++) {
+          const lat = 6.5 + y;
+          const lon = 65.5 + x;
+          if (lat < latStart || lat > latEnd || lon < lonStart || lon > lonEnd) continue;
+          if (preset === "warm_ocean") {
+            perturbation[0][y][x] = 3;
+            perturbation[5][y][x] = 0.15 * lastDay[5][y][x];
+          } else {
+            perturbation[2][y][x] = -0.4 * lastDay[2][y][x];
+            perturbation[3][y][x] = -0.4 * lastDay[3][y][x];
+          }
+        }
+      }
+      return perturbation;
     }
 
     const channel = Number($("shock-channel").value);
     const delta = Number($("shock-delta").value);
-    const la0 = Number($("lat-start").value), la1 = Number($("lat-end").value);
-    const lo0 = Number($("lon-start").value), lo1 = Number($("lon-end").value);
-    if (![channel, delta, la0, la1, lo0, lo1].every(Number.isFinite)) throw new Error("Shock controls must be finite numbers");
-    if (la0 > la1 || lo0 > lo1) throw new Error("Shock start coordinates must not exceed end coordinates");
-    for (let y=0; y<32; y++) for (let x=0; x<36; x++) {
-      const lat=6.5+y, lon=65.5+x;
-      if (lat>=la0 && lat<=la1 && lon>=lo0 && lon<=lo1) a[channel][y][x]=delta;
+    const latStart = Number($("lat-start").value);
+    const latEnd = Number($("lat-end").value);
+    const lonStart = Number($("lon-start").value);
+    const lonEnd = Number($("lon-end").value);
+    if (!Number.isInteger(channel) || channel < 0 || channel >= channels.length ||
+        ![delta, latStart, latEnd, lonStart, lonEnd].every(Number.isFinite)) {
+      throw new Error("Enter a finite change and valid grid coordinates.");
     }
-    return a;
-  }
-  async function callSim(perturbation) {
-    if (!state.input) throw new Error("Upload a real input window JSON file first");
-    const steps=Number($("steps").value);
-    if (!Number.isInteger(steps) || steps<1 || steps>14) throw new Error("Forecast steps must be 1–14");
-    const payload=Object.assign({},state.input,{steps:steps,perturbation:perturbation});
-    const res=await fetch("/simulate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-    const data=await res.json();
-    if (!res.ok) throw new Error((data.detail && data.detail.reason) || data.detail || ("API HTTP "+res.status));
-    if (!Array.isArray(data.rollout) || JSON.stringify(shapeOf(data.rollout))!==JSON.stringify([steps,6,32,36]))
-      throw new Error("API returned an invalid rollout shape");
-    finiteTree(data.rollout,"rollout");
-    return data;
-  }
-  function val(rollout,day,ch,y,x) { return rollout[day][ch][y][x]; }
-  function maxDiff(a,b,day,ch) {
-    let m=0; for(let y=0;y<32;y++) for(let x=0;x<36;x++) m=Math.max(m,Math.abs(val(a,day,ch,y,x)-val(b,day,ch,y,x))); return m;
-  }
-  function color(v,lo,hi,diverging) {
-    const t=Math.max(0,Math.min(1,(v-lo)/Math.max(hi-lo,1e-12)));
-    if(diverging) {
-      if(t<0.5) { const q=t*2; return [Math.round(35+215*q),Math.round(80+145*q),245]; }
-      const q=(t-0.5)*2; return [250,Math.round(225-175*q),Math.round(245-210*q)];
+    if (latStart > latEnd || lonStart > lonEnd) {
+      throw new Error("Each start coordinate must be less than or equal to its end.");
     }
-    return [Math.round(25+225*t),Math.round(75+115*(1-Math.abs(t-0.55))),Math.round(170+65*(1-t))];
+    if (latStart < 6.5 || latEnd > 37.5 || lonStart < 65.5 || lonEnd > 100.5) {
+      throw new Error("Keep the custom area inside the India model grid.");
+    }
+
+    let touchedCells = 0;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 36; x++) {
+        const lat = 6.5 + y;
+        const lon = 65.5 + x;
+        if (lat >= latStart && lat <= latEnd && lon >= lonStart && lon <= lonEnd) {
+          perturbation[channel][y][x] = delta;
+          touchedCells++;
+        }
+      }
+    }
+    if (!touchedCells) {
+      throw new Error("That custom area does not include any grid-cell centres.");
+    }
+    return perturbation;
   }
+
+  async function callSim(perturbation, steps) {
+    const response = await fetch("/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        init_states: state.input.init_states,
+        doy_sincos: state.input.doy_sincos,
+        steps: steps,
+        perturbation: perturbation
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(detailMessage(data, "Simulation request failed (HTTP " + response.status + ")."));
+    }
+    assertShapeAndFinite(data.rollout, [steps, 6, 32, 36], "rollout");
+    if (typeof data.inference_ms !== "number" || !Number.isFinite(data.inference_ms) || data.inference_ms < 0) {
+      throw new Error("The API returned an invalid inference time.");
+    }
+    return { rollout: data.rollout, inferenceMs: data.inference_ms, steps: steps };
+  }
+
+  function valueAt(rollout, day, channel, y, x) {
+    return rollout[day][channel][y][x];
+  }
+
+  function maxDifference(left, right, day, channel) {
+    let maximum = 0;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 36; x++) {
+        maximum = Math.max(maximum, Math.abs(
+          valueAt(left, day, channel, y, x) - valueAt(right, day, channel, y, x)
+        ));
+      }
+    }
+    return maximum;
+  }
+
+  function maxAllDifference(left, right) {
+    let maximum = 0;
+    for (let day = 0; day < left.length; day++) {
+      for (let channel = 0; channel < channels.length; channel++) {
+        maximum = Math.max(maximum, maxDifference(left, right, day, channel));
+      }
+    }
+    return maximum;
+  }
+
+  function interpolate(start, end, amount) {
+    return start.map((value, index) => Math.round(value + (end[index] - value) * amount));
+  }
+
+  function colorAt(value, low, high, difference) {
+    const stops = difference
+      ? [[40, 126, 163], [169, 197, 198], [238, 229, 212], [233, 196, 125], [189, 77, 53]]
+      : [[23, 107, 155], [88, 167, 179], [229, 191, 81], [216, 84, 56]];
+    const t = Math.max(0, Math.min(1, (value - low) / Math.max(high - low, 1e-12)));
+    const scaled = t * (stops.length - 1);
+    const index = Math.min(stops.length - 2, Math.floor(scaled));
+    return interpolate(stops[index], stops[index + 1], scaled - index);
+  }
+
+  function formatValue(value) {
+    if (!Number.isFinite(value)) return "—";
+    if (Math.abs(value) >= 100000 || (value !== 0 && Math.abs(value) < 0.001)) {
+      return value.toExponential(2);
+    }
+    return value.toFixed(2);
+  }
+
+  function setMetric(id, value, unit) {
+    $(id).textContent = Number.isFinite(value) ? formatValue(value) + " " + unit : "—";
+  }
+
+  function drawGridBase() {
+    ctx.fillStyle = "#172020";
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    ctx.strokeStyle = "rgba(240, 235, 220, .16)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= 36; x += 6) {
+      const px = x * canvasWidth / 36;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, canvasHeight);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= 32; y += 4) {
+      const py = y * canvasHeight / 32;
+      ctx.beginPath();
+      ctx.moveTo(0, py);
+      ctx.lineTo(canvasWidth, py);
+      ctx.stroke();
+    }
+  }
+
   function draw() {
-    const day=Number($("day").value)-1, ch=Number($("channel").value), mode=$("view-mode").value;
-    const source=mode==="shock"?state.shock:state.baseline;
-    if(!source || (mode==="difference" && (!state.baseline || !state.shock))) {
-      ctx.clearRect(0,0,map.width,map.height); ctx.fillStyle="#aab5c5"; ctx.font="18px system-ui";
-      ctx.fillText("Run baseline and shocked forecasts to compare.",30,55); return;
+    drawGridBase();
+    const mode = $("view-mode").value;
+    const day = Math.max(0, Number($("day").value) - 1);
+    const channel = Number($("channel").value);
+    const source = mode === "shock" ? state.shock : state.baseline;
+    const hasDifference = mode === "difference" && state.baseline && state.shock;
+
+    $("map-empty").hidden = Boolean(source || hasDifference);
+    if (!source && !hasDifference) {
+      $("result-label").textContent = "Waiting for a baseline";
+      $("legend-min").textContent = "Lower";
+      $("legend-max").textContent = "Higher";
+      $("legend-gradient").classList.remove("difference");
+      $("metric-min").textContent = "—";
+      $("metric-max").textContent = "—";
+      $("metric-diff").textContent = "—";
+      drawSelection();
+      return;
     }
-    if(day>=source.length) { $("day").value=source.length; return draw(); }
-    const vals=[];
-    for(let y=0;y<32;y++) for(let x=0;x<36;x++) vals.push(mode==="difference" ? val(state.shock,day,ch,y,x)-val(state.baseline,day,ch,y,x) : val(source,day,ch,y,x));
-    let lo=Math.min.apply(null,vals), hi=Math.max.apply(null,vals);
-    if(mode==="difference") { const m=Math.max(Math.abs(lo),Math.abs(hi),1e-9); lo=-m; hi=m; }
-    else if(hi===lo) { lo-=1; hi+=1; }
-    ctx.clearRect(0,0,map.width,map.height);
-    const cw=map.width/36, chh=map.height/32;
-    for(let y=0;y<32;y++) for(let x=0;x<36;x++) {
-      const v=mode==="difference" ? val(state.shock,day,ch,y,x)-val(state.baseline,day,ch,y,x) : val(source,day,ch,y,x);
-      const rgb=color(v,lo,hi,mode==="difference");
-      ctx.fillStyle="rgb("+rgb.join(",")+")"; ctx.fillRect(x*cw,(31-y)*chh,Math.ceil(cw),Math.ceil(chh));
+
+    const rollout = mode === "difference" ? state.baseline.rollout : source.rollout;
+    if (day >= rollout.length) {
+      $("day").value = String(rollout.length);
+      return draw();
     }
-    ctx.strokeStyle="rgba(255,255,255,.16)"; ctx.lineWidth=1;
-    for(let x=0;x<=36;x+=6) { ctx.beginPath();ctx.moveTo(x*cw,0);ctx.lineTo(x*cw,map.height);ctx.stroke(); }
-    for(let y=0;y<=32;y+=4) { ctx.beginPath();ctx.moveTo(0,y*chh);ctx.lineTo(map.width,y*chh);ctx.stroke(); }
-    if (selection) {
-      const sx=Math.min(selection.x0,selection.x1), ex=Math.max(selection.x0,selection.x1);
-      const sy=Math.min(selection.y0,selection.y1), ey=Math.max(selection.y0,selection.y1);
-      ctx.strokeStyle="#ffe28a";ctx.lineWidth=3;
-      ctx.strokeRect(sx*cw,(31-ey)*chh,(ex-sx+1)*cw,(ey-sy+1)*chh);
+
+    const values = [];
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 36; x++) {
+        values.push(mode === "difference"
+          ? valueAt(state.shock.rollout, day, channel, y, x) - valueAt(state.baseline.rollout, day, channel, y, x)
+          : valueAt(rollout, day, channel, y, x));
+      }
     }
-    $("result-label").textContent=(mode==="difference"?"Difference":mode==="shock"?"Counterfactual":"Baseline")+" · Day "+(day+1);
-    const maxD=state.baseline&&state.shock?maxDiff(state.baseline,state.shock,day,ch).toFixed(4):"—";
-    $("metrics").innerHTML='<div class="metric"><span>Min</span><strong>'+lo.toFixed(3)+' '+(mode==="difference"?"":units[ch])+'</strong></div><div class="metric"><span>Max</span><strong>'+hi.toFixed(3)+' '+(mode==="difference"?"":units[ch])+'</strong></div><div class="metric"><span>Max |difference|</span><strong>'+maxD+'</strong></div>';
+
+    let low = Math.min(...values);
+    let high = Math.max(...values);
+    if (mode === "difference") {
+      const extent = Math.max(Math.abs(low), Math.abs(high), 1e-9);
+      low = -extent;
+      high = extent;
+      $("legend-gradient").classList.add("difference");
+    } else {
+      if (low === high) { low -= 1; high += 1; }
+      $("legend-gradient").classList.remove("difference");
+    }
+
+    const cellWidth = canvasWidth / 36;
+    const cellHeight = canvasHeight / 32;
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 36; x++) {
+        const value = mode === "difference"
+          ? valueAt(state.shock.rollout, day, channel, y, x) - valueAt(state.baseline.rollout, day, channel, y, x)
+          : valueAt(rollout, day, channel, y, x);
+        const rgb = colorAt(value, low, high, mode === "difference");
+        ctx.fillStyle = "rgb(" + rgb.join(",") + ")";
+        ctx.fillRect(x * cellWidth, (31 - y) * cellHeight, Math.ceil(cellWidth), Math.ceil(cellHeight));
+      }
+    }
+
+    drawGridLines(cellWidth, cellHeight);
+    drawSelection();
+    $("result-label").textContent =
+      (mode === "difference" ? "Difference" : mode === "shock" ? "Counterfactual" : "Baseline") +
+      " · Day " + (day + 1);
+    $("legend-min").textContent = formatValue(low) + " " + channels[channel].unit;
+    $("legend-max").textContent = formatValue(high) + " " + channels[channel].unit;
+    setMetric("metric-min", low, channels[channel].unit);
+    setMetric("metric-max", high, channels[channel].unit);
+    $("metric-diff").textContent = state.shock
+      ? formatValue(maxDifference(state.baseline.rollout, state.shock.rollout, day, channel)) + " " + channels[channel].unit
+      : "—";
   }
-  $("window-file").addEventListener("change",async e=>{
-    const file=e.target.files && e.target.files[0]; if(!file)return;
+
+  function drawGridLines(cellWidth, cellHeight) {
+    ctx.strokeStyle = "rgba(246, 241, 231, .28)";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= 36; x += 6) {
+      const px = x * cellWidth;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, canvasHeight);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= 32; y += 4) {
+      const py = y * cellHeight;
+      ctx.beginPath();
+      ctx.moveTo(0, py);
+      ctx.lineTo(canvasWidth, py);
+      ctx.stroke();
+    }
+  }
+
+  function drawSelection() {
+    if (!state.selection) return;
+    const cellWidth = canvasWidth / 36;
+    const cellHeight = canvasHeight / 32;
+    const minX = Math.min(state.selection.x0, state.selection.x1);
+    const maxX = Math.max(state.selection.x0, state.selection.x1);
+    const minY = Math.min(state.selection.y0, state.selection.y1);
+    const maxY = Math.max(state.selection.y0, state.selection.y1);
+    ctx.strokeStyle = "#f4c655";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(
+      minX * cellWidth,
+      (31 - maxY) * cellHeight,
+      (maxX - minX + 1) * cellWidth,
+      (maxY - minY + 1) * cellHeight
+    );
+  }
+
+  function updateScenarioDescription() {
+    const preset = $("shock-preset").value;
+    const custom = preset === "custom";
+    $("custom-controls").hidden = !custom;
+    if (custom) $("custom-controls").open = true;
+    else $("custom-controls").open = false;
+
+    const descriptions = {
+      warm_ocean: "Bay of Bengal · 8°–20°N, 82°–94°E · +3 K temperature and +15% water vapour.",
+      monsoon_stall: "Arabian Sea · 8°–20°N, 65°–75°E · −40% eastward and northward winds.",
+      custom: "Choose one variable and a region. Or drag across the forecast grid to set the area."
+    };
+    $("shock-description").textContent = descriptions[preset];
+  }
+
+  function invalidateShock() {
+    if (state.shock) {
+      state.shock = null;
+      $("shock-time").textContent = "";
+      $("view-mode").value = "baseline";
+      syncControls();
+      draw();
+    }
+  }
+
+  async function runBaseline() {
+    if (!state.input) {
+      setMessage("Choose a valid three-day JSON window first.", "error");
+      return;
+    }
+    const steps = Number($("steps").value);
+    if (!Number.isInteger(steps) || steps < 1 || steps > 14) {
+      setMessage("Forecast length must be a whole number from 1 to 14 days.", "error");
+      return;
+    }
+
+    state.busy = "baseline";
+    syncControls();
+    setMessage("Running the baseline on the local model…");
     try {
-      state.input=validateInput(JSON.parse(await file.text()));
-      state.baseline=state.shock=state.zero=null;
-      $("run-shock").disabled=$("run-zero").disabled=false;
-      $("day").max=$("steps").value; setMessage("Loaded "+file.name+". Run baseline forecast.");draw();
-    } catch(err) { state.input=null;setMessage(err.message,true); }
-  });
-  $("run-baseline").addEventListener("click",async()=>{
+      const result = await callSim(null, steps);
+      state.baseline = result;
+      state.shock = null;
+      $("baseline-time").textContent = "Model inference: " + result.inferenceMs.toFixed(1) + " ms";
+      $("shock-time").textContent = "";
+      $("day").max = String(steps);
+      $("day").value = "1";
+      $("view-mode").value = "baseline";
+      setMessage("Baseline received from the live FORKCAST model.", "success");
+    } catch (error) {
+      state.baseline = null;
+      state.shock = null;
+      $("view-mode").value = "baseline";
+      setMessage(error.message || "The baseline request failed.", "error");
+    } finally {
+      state.busy = "";
+      syncControls();
+      draw();
+    }
+  }
+
+  async function runShock() {
+    if (!state.baseline) {
+      setMessage("Run a baseline forecast before the counterfactual.", "error");
+      return;
+    }
+    state.busy = "shock";
+    syncControls();
+    setMessage("Running the counterfactual on the local model…");
     try {
-      $("run-baseline").disabled=true;setMessage("Running live baseline simulation…");
-      const out=await callSim(null);state.baseline=out.rollout;
-      $("baseline-time").textContent="Model inference: "+out.inference_ms.toFixed(2)+" ms";
-      $("day").max=$("steps").value;$("day").value=1;$("view-mode").value="baseline";
-      setMessage("Baseline forecast received from live FORKCAST model.");draw();
-    } catch(err) {setMessage(err.message,true);} finally {$("run-baseline").disabled=false;}
-  });
-  $("run-shock").addEventListener("click",async()=>{
+      const result = await callSim(makeShock(), state.baseline.steps);
+      state.shock = result;
+      $("shock-time").textContent = "Model inference: " + result.inferenceMs.toFixed(1) + " ms";
+      $("view-mode").value = "shock";
+      setMessage("Counterfactual received. Choose a view to compare it with the baseline.", "success");
+    } catch (error) {
+      state.shock = null;
+      $("view-mode").value = "baseline";
+      setMessage(error.message || "The counterfactual request failed.", "error");
+    } finally {
+      state.busy = "";
+      syncControls();
+      draw();
+    }
+  }
+
+  async function verifyZeroShock() {
+    if (!state.baseline) {
+      setMessage("Run a baseline forecast before the model check.", "error");
+      return;
+    }
+    state.busy = "zero";
+    syncControls();
+    setMessage("Checking the same input with a zero-valued shock…");
     try {
-      if(!state.baseline)throw new Error("Run baseline forecast first");
-      $("run-shock").disabled=true;setMessage("Running counterfactual simulation…");
-      const out=await callSim(makeShock());state.shock=out.rollout;
-      $("shock-time").textContent="Model inference: "+out.inference_ms.toFixed(2)+" ms";
-      $("view-mode").value="shock";setMessage("Shocked forecast received from live FORKCAST model.");draw();
-    } catch(err) {setMessage(err.message,true);} finally {$("run-shock").disabled=false;}
-  });
-  $("run-zero").addEventListener("click",async()=>{
-    try {
-      if(!state.baseline)throw new Error("Run baseline forecast first");
-      $("run-zero").disabled=true;setMessage("Checking zero-shock equality…");
-      const z=Array.from({length:6},()=>Array.from({length:32},()=>Array(36).fill(0)));
-      const out=await callSim(z);state.zero=out.rollout;state.shock=state.zero;
-      let global=0;for(let d=0;d<state.baseline.length;d++)for(let c=0;c<6;c++)global=Math.max(global,maxDiff(state.baseline,state.zero,d,c));
-      setMessage("Zero-shock max absolute difference: "+global.toExponential(3)+(global<=1e-3?" · within raw tolerance; also verify channel-std contract":" · CHECK FAILED"),global>1e-3);
-      $("view-mode").value="difference";draw();
-    } catch(err) {setMessage(err.message,true);} finally {$("run-zero").disabled=false;}
-  });
-  ["channel","day","view-mode"].forEach(id=>$(id).addEventListener("change",draw));
-  $("steps").addEventListener("change",()=>{$("day").max=$("steps").value;if(Number($("day").value)>Number($("steps").value))$("day").value=$("steps").value;});
+      const zero = Array.from({ length: 6 }, () =>
+        Array.from({ length: 32 }, () => Array(36).fill(0)));
+      const result = await callSim(zero, state.baseline.steps);
+      const difference = maxAllDifference(state.baseline.rollout, result.rollout);
+      $("view-mode").value = "baseline";
+      setMessage(
+        "Zero-shock maximum raw difference: " + difference.toExponential(3) +
+        " across channels with different physical units.",
+        "success"
+      );
+    } catch (error) {
+      setMessage(error.message || "The zero-shock check failed.", "error");
+    } finally {
+      state.busy = "";
+      syncControls();
+      draw();
+    }
+  }
+
   function gridPoint(event) {
-    const rect=map.getBoundingClientRect();
-    const x=Math.max(0,Math.min(35,Math.floor((event.clientX-rect.left)/rect.width*36)));
-    const topY=Math.max(0,Math.min(31,Math.floor((event.clientY-rect.top)/rect.height*32)));
-    return {x:x,y:31-topY};
+    const rect = map.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const x = Math.max(0, Math.min(35, Math.floor((event.clientX - rect.left) / rect.width * 36)));
+    const topY = Math.max(0, Math.min(31, Math.floor((event.clientY - rect.top) / rect.height * 32)));
+    return { x: x, y: 31 - topY };
   }
-  map.addEventListener("pointerdown",event=>{dragStart=gridPoint(event);selection=null;map.setPointerCapture(event.pointerId);});
-  map.addEventListener("pointerup",event=>{
-    if(!dragStart)return;
-    const end=gridPoint(event);selection={x0:dragStart.x,y0:dragStart.y,x1:end.x,y1:end.y};dragStart=null;
-    const minX=Math.min(selection.x0,selection.x1),maxX=Math.max(selection.x0,selection.x1);
-    const minY=Math.min(selection.y0,selection.y1),maxY=Math.max(selection.y0,selection.y1);
-    $("lon-start").value=65.5+minX;$("lon-end").value=65.5+maxX;
-    $("lat-start").value=6.5+minY;$("lat-end").value=6.5+maxY;
-    $("shock-preset").value="custom";
-    setMessage("Custom shock rectangle selected on the grid. Run the shocked forecast to compare.");draw();
+
+  function applySelectionToCustomArea() {
+    const selection = state.selection;
+    const minX = Math.min(selection.x0, selection.x1);
+    const maxX = Math.max(selection.x0, selection.x1);
+    const minY = Math.min(selection.y0, selection.y1);
+    const maxY = Math.max(selection.y0, selection.y1);
+    $("lon-start").value = String(65.5 + minX);
+    $("lon-end").value = String(65.5 + maxX);
+    $("lat-start").value = String(6.5 + minY);
+    $("lat-end").value = String(6.5 + maxY);
+    $("shock-preset").value = "custom";
+    updateScenarioDescription();
+    invalidateShock();
+    setMessage("Custom area selected. Run the counterfactual to model this change.");
+    draw();
+  }
+
+  $("window-file").addEventListener("change", (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (file) loadWindow(file);
   });
-  checkHealth();draw();
+  $("file-drop-area").addEventListener("dragover", (event) => {
+    event.preventDefault();
+    if (!state.busy) $("file-drop-area").classList.add("dragging");
+  });
+  $("file-drop-area").addEventListener("dragleave", () => {
+    $("file-drop-area").classList.remove("dragging");
+  });
+  $("file-drop-area").addEventListener("drop", (event) => {
+    event.preventDefault();
+    $("file-drop-area").classList.remove("dragging");
+    const file = event.dataTransfer && event.dataTransfer.files[0];
+    if (file) loadWindow(file);
+  });
+
+  $("run-baseline").addEventListener("click", runBaseline);
+  $("run-shock").addEventListener("click", runShock);
+  $("run-zero").addEventListener("click", verifyZeroShock);
+  $("shock-preset").addEventListener("change", () => {
+    updateScenarioDescription();
+    invalidateShock();
+  });
+  ["shock-channel", "shock-delta", "lat-start", "lat-end", "lon-start", "lon-end"].forEach((id) => {
+    $(id).addEventListener("change", invalidateShock);
+  });
+  ["channel", "day", "view-mode"].forEach((id) => $(id).addEventListener("change", draw));
+  $("steps").addEventListener("change", () => {
+    $("day").max = $("steps").value;
+    if (Number($("day").value) > Number($("steps").value)) $("day").value = $("steps").value;
+    if (state.baseline || state.shock) {
+      state.baseline = null;
+      state.shock = null;
+      $("baseline-time").textContent = "";
+      $("shock-time").textContent = "";
+      $("view-mode").value = "baseline";
+      setMessage("Forecast length changed. Run a new baseline to update the results.");
+      syncControls();
+      draw();
+    }
+  });
+
+  map.addEventListener("pointerdown", (event) => {
+    const point = gridPoint(event);
+    if (!point) return;
+    dragStart = point;
+    state.selection = { x0: point.x, y0: point.y, x1: point.x, y1: point.y };
+    map.setPointerCapture(event.pointerId);
+    draw();
+  });
+  map.addEventListener("pointermove", (event) => {
+    if (!dragStart) return;
+    const point = gridPoint(event);
+    if (!point) return;
+    state.selection.x1 = point.x;
+    state.selection.y1 = point.y;
+    draw();
+  });
+  map.addEventListener("pointerup", (event) => {
+    if (!dragStart) return;
+    const point = gridPoint(event);
+    if (point) {
+      state.selection.x1 = point.x;
+      state.selection.y1 = point.y;
+    }
+    dragStart = null;
+    applySelectionToCustomArea();
+  });
+  map.addEventListener("pointercancel", () => {
+    dragStart = null;
+    draw();
+  });
+
+  updateScenarioDescription();
+  syncControls();
+  draw();
+  checkHealth();
 })();
