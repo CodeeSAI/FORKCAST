@@ -1,111 +1,227 @@
+<!--
+THESIS: Make the forecast comparison the product; refuse the cluttered climate-control-room dashboard.
+OWN-WORLD: Storm charcoal, warm paper, monsoon blue, and a single sun-yellow action color echo the supplied posters.
+STORY: Load a real window, run a baseline, add one documented or custom shock, and compare live model output.
+FIRST VIEWPORT: A concise storm-dark introduction above a two-column workbench; the upload and baseline action lead.
+FORM: A compact field notebook with a persistent input/scenario rail and a spacious, honest weather-grid canvas.
+-->
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FORKCAST — Fork the Forecast</title>
+  <meta name="theme-color" content="#172020">
+  <meta name="description" content="Explore baseline and counterfactual monsoon forecasts from the local FORKCAST model.">
+  <title>FORKCAST — Monsoon forecast lab</title>
   <link rel="stylesheet" href="/dashboard/style.css">
   <script defer src="/dashboard/app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#workspace">Skip to forecast workspace</a>
+
   <header class="topbar">
-    <div class="brand-mark">F</div>
-    <div>
-      <div class="brand">FORKCAST</div>
-      <div class="tagline">Fork the Forecast. See the Impact.</div>
+    <a class="brand" href="#top" aria-label="FORKCAST home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 42 42" role="presentation">
+          <rect x="2" y="2" width="38" height="38" rx="4" fill="#222b2b"/>
+          <rect x="2" y="2" width="12" height="12" fill="#2580a7"/>
+          <rect x="14" y="14" width="14" height="14" fill="#eab13b"/>
+          <path d="M28 28h12v12H28z" fill="#f3ead9"/>
+        </svg>
+      </span>
+      <span class="brand-type">
+        <strong>FORKCAST</strong>
+        <span>MONSOON FORECAST LAB</span>
+      </span>
+    </a>
+    <div class="status-wrap" role="status" aria-live="polite">
+      <span id="status-dot" class="dot" aria-hidden="true"></span>
+      <span id="status-text">Checking local model…</span>
     </div>
-    <div class="status-wrap"><span id="status-dot" class="dot"></span><span id="status-text">Checking model…</span></div>
   </header>
 
-  <main>
-    <section class="hero">
-      <p class="eyebrow">MULTIVERSE OF MONSOON · INDIA</p>
-      <h1>Explore alternate weather futures.</h1>
-      <p class="sub">Run the baseline forecast, introduce a localized physical shock, and compare the model's live outputs.</p>
-    </section>
-
-    <section class="panel setup">
-      <div class="section-head"><div><p class="eyebrow">01 / INPUT</p><h2>Load a three-day weather window</h2></div><span class="pill">Physical units</span></div>
-      <label class="field">Input window JSON
-        <input id="window-file" type="file" accept=".json,application/json">
-      </label>
-      <p class="hint">JSON format: {"init_states":[3×6×32×36 nested numbers],"doy_sincos":[sin,cos]}. Use a real exported sample window; no forecast is generated from placeholder data.</p>
-      <div class="controls">
-        <label class="field">Forecast steps
-          <input id="steps" type="number" min="1" max="14" value="10">
-        </label>
-        <label class="field">Variable to display
-          <select id="channel">
-            <option value="0">Temperature · t2m (K)</option>
-            <option value="1">Precipitation · tp (mm/day)</option>
-            <option value="2">Eastward wind · u10 (m/s)</option>
-            <option value="3">Northward wind · v10 (m/s)</option>
-            <option value="4">Pressure · msl (Pa)</option>
-            <option value="5">Water vapour · tcwv (kg/m²)</option>
-          </select>
-        </label>
-        <label class="field">Forecast day
-          <input id="day" type="number" min="1" max="10" value="1">
-        </label>
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">See what changes<br>when the monsoon shifts.</h1>
+        <p>Run a real weather window through FORKCAST, introduce a local atmospheric shock, and compare the two model forecasts.</p>
       </div>
-      <div class="actions">
-        <button id="run-baseline" class="button primary">Run baseline forecast</button>
-        <span id="baseline-time" class="hint"></span>
+      <div class="hero-note">
+        <span class="hero-rule" aria-hidden="true"></span>
+        <p><strong>A climate-model experiment</strong><br>Offline inference · India · 1° grid</p>
       </div>
     </section>
 
-    <section class="panel shock">
-      <div class="section-head"><div><p class="eyebrow">02 / COUNTERFACTUAL</p><h2>Introduce a localized shock</h2></div><span class="pill accent">What-if simulation</span></div>
-      <div class="controls">
-        <label class="field">Shock preset
-          <select id="shock-preset">
-            <option value="warm_ocean">Official · Warm Bay of Bengal (+3 K, +15% TCWV)</option>
-            <option value="monsoon_stall">Official · Monsoon stall (−40% u10 and v10)</option>
-            <option value="custom">Custom single-variable rectangle</option>
-          </select>
-        </label>
-        <label class="field">Weather variable
-          <select id="shock-channel">
-            <option value="0">Temperature · t2m (K)</option>
-            <option value="1">Precipitation · tp (mm/day)</option>
-            <option value="2">Eastward wind · u10 (m/s)</option>
-            <option value="3">Northward wind · v10 (m/s)</option>
-            <option value="4">Pressure · msl (Pa)</option>
-            <option value="5">Water vapour · tcwv (kg/m²)</option>
-          </select>
-        </label>
-        <label class="field">Delta (physical units)
-          <input id="shock-delta" type="number" step="any" value="3">
-        </label>
-        <label class="field">Latitude start / end (°)
-          <div class="pair"><input id="lat-start" type="number" value="8" step="1"><input id="lat-end" type="number" value="20" step="1"></div>
-        </label>
-        <label class="field">Longitude start / end (°)
-          <div class="pair"><input id="lon-start" type="number" value="82" step="1"><input id="lon-end" type="number" value="94" step="1"></div>
-        </label>
-      </div>
-      <p class="hint">Grid cell centres: latitude 6.5°–37.5° north; longitude 65.5°–100.5° east. The shock is added once to the last input day before simulation.</p>
-      <div class="actions">
-        <button id="run-shock" class="button secondary" disabled>Run shocked forecast</button>
-        <button id="run-zero" class="button ghost" disabled>Verify zero shock</button>
-        <span id="shock-time" class="hint"></span>
-      </div>
+    <section class="about-strip" aria-label="About FORKCAST">
+      <p><strong>What it does</strong> FORKCAST is a compact neural weather model. It projects the next 1–14 days from a real three-day input, then lets you compare that baseline with a simulated change to the starting conditions.</p>
+      <p class="about-caveat">It explores scenarios; it does not issue weather warnings or predict damage.</p>
     </section>
 
-    <section class="panel results">
-      <div class="section-head"><div><p class="eyebrow">03 / LIVE MODEL OUTPUT</p><h2>Timeline comparison</h2></div><span id="result-label" class="pill">Waiting for a run</span></div>
-      <div class="controls result-controls">
-        <label class="field">View
-          <select id="view-mode"><option value="baseline">Baseline</option><option value="shock">Shocked</option><option value="difference">Difference (shock − baseline)</option></select>
-        </label>
-      </div>
-      <div class="map-wrap"><canvas id="map" width="720" height="640" aria-label="32 by 36 India weather grid"></canvas></div>
-      <div class="legend"><span>Lower</span><div class="gradient"></div><span>Higher</span></div>
-      <div id="metrics" class="metrics"><div class="metric"><span>Baseline</span><strong>—</strong></div><div class="metric"><span>Counterfactual</span><strong>—</strong></div><div class="metric"><span>Max |difference|</span><strong>—</strong></div></div>
-      <p id="message" class="message" role="status">Load a real input window JSON file to begin.</p>
-    </section>
+    <div class="workspace" id="workspace">
+      <aside class="workflow" aria-label="Forecast setup">
+        <section class="panel" aria-labelledby="window-title">
+          <div class="panel-heading">
+            <span class="step-number">01</span>
+            <div>
+              <h2 id="window-title">Start with a weather window</h2>
+              <p>Use a real three-day sample exported from the project data.</p>
+            </div>
+          </div>
 
-    <footer>Experimental scenario simulator · Not an operational weather-warning service · Forecast maps are rendered from live /simulate responses.</footer>
+          <label class="upload-area" id="file-drop-area" for="window-file">
+            <input id="window-file" class="visually-hidden" type="file" accept=".json,application/json">
+            <svg class="upload-icon" viewBox="0 0 32 32" aria-hidden="true">
+              <path d="M16 21V5m0 0-6 6m6-6 6 6M6 19v7h20v-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="upload-title" id="file-title">Choose a JSON window</span>
+            <span class="upload-meta" id="file-meta">or drop the file here</span>
+          </label>
+          <p class="hint">Expected: <code>init_states [3, 6, 32, 36]</code> and <code>doy_sincos</code>. No sample forecast is built in.</p>
+
+          <label class="field horizon-field" for="steps">
+            <span>Forecast length <span class="field-unit">days</span></span>
+            <input id="steps" type="number" min="1" max="14" value="10" inputmode="numeric">
+          </label>
+          <button id="run-baseline" class="button primary" type="button" disabled>Run baseline forecast</button>
+          <p id="baseline-time" class="timing hint" aria-live="polite"></p>
+        </section>
+
+        <section class="panel" aria-labelledby="scenario-title">
+          <div class="panel-heading">
+            <span class="step-number">02</span>
+            <div>
+              <h2 id="scenario-title">Change the starting weather</h2>
+              <p>Choose a documented scenario or define a small custom area.</p>
+            </div>
+          </div>
+
+          <label class="field" for="shock-preset">
+            <span>Scenario</span>
+            <select id="shock-preset">
+              <option value="warm_ocean">Warm Bay of Bengal</option>
+              <option value="monsoon_stall">Monsoon stall</option>
+              <option value="custom">Custom area and variable</option>
+            </select>
+          </label>
+          <p id="shock-description" class="scenario-note">Bay of Bengal · 8°–20°N, 82°–94°E · +3 K temperature and +15% water vapour.</p>
+
+          <details id="custom-controls" class="custom-controls" hidden>
+            <summary>Set custom shock</summary>
+            <div class="custom-fields">
+              <label class="field" for="shock-channel">
+                <span>Variable</span>
+                <select id="shock-channel">
+                  <option value="0">Temperature · t2m (K)</option>
+                  <option value="1">Precipitation · tp (mm/day)</option>
+                  <option value="2">Eastward wind · u10 (m/s)</option>
+                  <option value="3">Northward wind · v10 (m/s)</option>
+                  <option value="4">Pressure · msl (Pa)</option>
+                  <option value="5">Water vapour · tcwv (kg/m²)</option>
+                </select>
+              </label>
+              <label class="field" for="shock-delta">
+                <span>Change <span class="field-unit">physical units</span></span>
+                <input id="shock-delta" type="number" step="any" value="3">
+              </label>
+              <div class="field">
+                <span>Latitude bounds <span class="field-unit">°N</span></span>
+                <div class="pair">
+                  <label class="visually-hidden" for="lat-start">Latitude start</label>
+                  <input id="lat-start" type="number" min="6.5" max="37.5" value="8" step="1">
+                  <label class="visually-hidden" for="lat-end">Latitude end</label>
+                  <input id="lat-end" type="number" min="6.5" max="37.5" value="20" step="1">
+                </div>
+              </div>
+              <div class="field">
+                <span>Longitude bounds <span class="field-unit">°E</span></span>
+                <div class="pair">
+                  <label class="visually-hidden" for="lon-start">Longitude start</label>
+                  <input id="lon-start" type="number" min="65.5" max="100.5" value="82" step="1">
+                  <label class="visually-hidden" for="lon-end">Longitude end</label>
+                  <input id="lon-end" type="number" min="65.5" max="100.5" value="94" step="1">
+                </div>
+              </div>
+            </div>
+            <p class="hint">You can also draw a custom box directly on the forecast grid.</p>
+          </details>
+
+          <button id="run-shock" class="button secondary" type="button" disabled>Run counterfactual</button>
+          <p id="shock-time" class="timing hint" aria-live="polite"></p>
+          <p class="hint">The change is applied once to the last input day. All forecast values come from the live model.</p>
+
+          <details class="model-check">
+            <summary>Model check</summary>
+            <p>Runs the same input with a zero-valued shock and reports the largest raw output difference.</p>
+            <button id="run-zero" class="button quiet" type="button" disabled>Verify zero shock</button>
+          </details>
+        </section>
+      </aside>
+
+      <section class="panel results" aria-labelledby="results-title">
+        <div class="results-heading">
+          <div>
+            <span class="step-number">03</span>
+            <h2 id="results-title">Compare the forecast</h2>
+          </div>
+          <span id="result-label" class="result-label" aria-live="polite">Waiting for a baseline</span>
+        </div>
+
+        <div class="map-controls">
+          <label class="field" for="channel">
+            <span>Weather variable</span>
+            <select id="channel">
+              <option value="0">Temperature · t2m (K)</option>
+              <option value="1">Precipitation · tp (mm/day)</option>
+              <option value="2">Eastward wind · u10 (m/s)</option>
+              <option value="3">Northward wind · v10 (m/s)</option>
+              <option value="4">Pressure · msl (Pa)</option>
+              <option value="5">Water vapour · tcwv (kg/m²)</option>
+            </select>
+          </label>
+          <label class="field day-field" for="day">
+            <span>Forecast day</span>
+            <input id="day" type="number" min="1" max="10" value="1" inputmode="numeric" disabled>
+          </label>
+          <label class="field view-field" for="view-mode">
+            <span>Show</span>
+            <select id="view-mode">
+              <option value="baseline">Baseline</option>
+              <option value="shock" disabled>Counterfactual</option>
+              <option value="difference" disabled>Difference</option>
+            </select>
+          </label>
+        </div>
+
+        <p class="grid-caption">India · 32 × 36 cells · 6.5°–37.5°N · 65.5°–100.5°E</p>
+        <div class="map-wrap" id="map-wrap">
+          <canvas id="map" width="720" height="640" aria-label="Forecast field on a 32 by 36 India grid"></canvas>
+          <div id="map-empty" class="map-empty">
+            <span class="empty-sun" aria-hidden="true"></span>
+            <strong>Your forecast will appear here</strong>
+            <span>Load a real window, then run the baseline.</span>
+          </div>
+        </div>
+        <p class="map-help">Drag across the grid to set a custom shock area.</p>
+
+        <div class="legend" aria-label="Map color scale">
+          <span id="legend-min">Lower</span>
+          <span id="legend-gradient" class="gradient" aria-hidden="true"></span>
+          <span id="legend-max">Higher</span>
+        </div>
+
+        <div id="metrics" class="metrics" aria-live="polite">
+          <div class="metric"><span>Field minimum</span><strong id="metric-min">—</strong></div>
+          <div class="metric"><span>Field maximum</span><strong id="metric-max">—</strong></div>
+          <div class="metric"><span>Peak absolute change</span><strong id="metric-diff">—</strong></div>
+        </div>
+        <p id="message" class="message" role="status" aria-live="polite">Choose a real three-day JSON window to begin.</p>
+      </section>
+    </div>
+
+    <footer>
+      <span>FORKCAST · Experimental scenario simulator</span>
+      <span>Not an operational weather-warning or impact-prediction service.</span>
+    </footer>
   </main>
 </body>
 </html>
